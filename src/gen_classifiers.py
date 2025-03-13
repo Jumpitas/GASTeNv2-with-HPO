@@ -3,8 +3,7 @@ import subprocess
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 import os
 from dotenv import load_dotenv
-from utils import begin_classifier, begin_ensemble
-
+from utils import begin_classifier  # Removed begin_ensemble
 
 load_dotenv()
 parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
@@ -29,38 +28,46 @@ parser.add_argument('--neg', dest='neg_class', default=4,
                     type=int, help='Negative class for binary classification')
 
 parser.add_argument('--epochs', type=str, default="3",
-                    help='List of number of epochs to train for')
+                    help='Comma-separated list of number of epochs to train for')
 parser.add_argument('--classifier-type', dest='clf_type',
-                    type=str, help='list with elements "cnn", "mlp", "ensemble:pretrained" or "ensemble:cnn"', default='cnn')
+                    type=str, help='List with elements "cnn" or "mlp"', default='cnn')
 parser.add_argument('--nf', type=str, default="2,4,8,16",
-                    help='List of possible num features')
-parser.add_argument("--seed", type=int, help='random seed to use in generation', default=None)
+                    help='Comma-separated list of possible num features')
+parser.add_argument("--seed", type=int, help='Random seed to use in generation', default=None)
 parser.add_argument('--early-acc', dest='early_acc',
                     type=float, default=1.0, help='Early accuracy criteria')
 
 def main():
     args = parser.parse_args()
-    print(args)
+    print("Arguments:", args)
 
-    n_classes = args.n_classes
+    # Ensure n_classes is an integer
+    try:
+        n_classes = int(args.n_classes)
+    except ValueError:
+        n_classes = 10
 
-    l_epochs = list(set([e
-                    for e in args.epochs.split(",") if e.isdigit()]))
-    l_clf_type = list(set([ct
-                           for ct in args.clf_type.split(",")]))
-    l_epochs.sort()
+    # Process epochs and classifier types into sorted unique lists
+    l_epochs = list(set([e for e in args.epochs.split(",") if e.isdigit()]))
+    l_clf_type = list(set([ct for ct in args.clf_type.split(",")]))
+    l_epochs.sort(key=int)
     l_clf_type.sort()
 
+    print("Epochs list:", l_epochs)
+    print("Classifier types list:", l_clf_type)
+
+    # Create an iterator over class pairs
     if args.pos_class is not None and args.neg_class is not None:
         iterator = iter([(str(args.neg_class), str(args.pos_class))])
+        print("Using fixed binary pair: ({} vs {})".format(args.neg_class, args.pos_class))
     else:
         iterator = itertools.combinations(range(n_classes), 2)
+        print("Using all combinations for {} classes".format(n_classes))
 
+    # Always use begin_classifier regardless of input type
     for clf_type in l_clf_type:
-        if 'ensemble' in clf_type:
-            begin_ensemble(iterator, clf_type, l_epochs, args)
-        else:
-            begin_classifier(iterator, clf_type, l_epochs, args)
+        print("Processing classifier type:", clf_type)
+        begin_classifier(iterator, clf_type, l_epochs, args)
 
 if __name__ == '__main__':
     main()

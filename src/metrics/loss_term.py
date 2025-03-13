@@ -1,7 +1,6 @@
 import torch
 from .metric import Metric
 
-
 class LossSecondTerm(Metric):
     def __init__(self, C):
         super().__init__()
@@ -12,18 +11,18 @@ class LossSecondTerm(Metric):
 
     def update(self, images, batch):
         start_idx, batch_size = batch
-
         with torch.no_grad():
-            c_output = self.C.get(images, start_idx, batch_size)
-
-        term_2 = (0.5 - c_output).abs().sum().item()
-
+            # Call the classifier with output_feature_maps=True.
+            # Instead of unpacking, we take the first element as the prediction.
+            output = self.C(images, output_feature_maps=True)
+            c_output = output[0]
+        # Use mean() instead of sum() to average over non-batch dimensions.
+        term_2 = (0.5 - c_output).abs().mean().item()
         self.acc += term_2
         self.count += images.size(0)
 
     def finalize(self):
         self.result = self.acc / self.count
-
         return self.result
 
     def reset(self):
