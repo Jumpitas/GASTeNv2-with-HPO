@@ -1,22 +1,25 @@
-project: gasten_20230413
-name: mnist-5v3_test
+project: bayesian_mnist
+name: optimization
 out-dir: out
 data-dir: data
 test-noise: data/z\z_2048_64
-fixed-noise: 200
+fixed-noise: 2000
 
 device: cuda:0
-num-workers: 6
+num-workers: 0
 
 fid-stats-path: data/fid-stats/stats.inception.mnist.5v3.npz
-
-num-runs: 1
 
 dataset:
   name: mnist
   binary:
     pos: 5
     neg: 3
+
+optimizer:
+  lr: 0.0002
+  beta1: 0.5
+  beta2: 0.999
 
 model:
   z_dim: 64
@@ -29,28 +32,21 @@ model:
   loss:
     name: ns
 
-optimizer:
-  lr: 0.0002
-  beta1: 0.5
-  beta2: 0.999
-
 train:
   step-1:
     epochs: 10
     checkpoint-every: 1
     disc-iters: 1
     batch-size: 64
-
   step-2:
-    epochs: 40
+    epochs: 2
     checkpoint-every: 10
     step-1-epochs:
-      - best
+      - 10
     batch-size: 64
     disc-iters: 1
-    classifier:
-      - models/mnist.5v3/cnn-4-50.4441
     weight:
       - gaussian:
           alpha: 1.0
           var: 0.01
+    classifier: ["models/mnist.5v3/cnn-4-50.4441"]

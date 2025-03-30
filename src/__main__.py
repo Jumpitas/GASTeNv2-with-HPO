@@ -24,7 +24,7 @@ from src.gan import construct_gan, construct_loss
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", dest="config_path",
-                        required=True, help="Config file")
+                        required=True, help="Path to config file")
     return parser.parse_args()
 
 
@@ -66,6 +66,7 @@ def train_modified_gan(config, dataset, cp_dir, gan_path, test_noise,
     n_disc_iters = config['train']['step-2']['disc-iters']
     checkpoint_every = config['train']['step-2']['checkpoint-every']
 
+    # Load GAN checkpoint for the given epoch.
     G, D, _, _ = construct_gan_from_checkpoint(gan_path, device=device)
     g_crit, d_crit = construct_loss(config["model"]["loss"], D)
     g_optim, d_optim = construct_optimizers(config["optimizer"], G, D)
@@ -79,7 +80,7 @@ def train_modified_gan(config, dataset, cp_dir, gan_path, test_noise,
         var = weight["gaussian-v2"]["var"]
         g_updater = UpdateGeneratorGASTEN_gaussianV2(g_crit, C, alpha=alpha, var=var)
     else:
-        raise NotImplementedError("Only gaussian loss update variants are supported for GASTeN v2.")
+        raise NotImplementedError("Only Gaussian loss variants are supported.")
 
     early_stop_key = 'conf_dist'
     early_stop_crit = config['train']['step-2'].get('early-stop', {}).get('criteria', None)
@@ -121,8 +122,9 @@ def train_modified_gan(config, dataset, cp_dir, gan_path, test_noise,
 
 
 def compute_dataset_fid_stats(dset, get_feature_map_fn, dims, batch_size=64, device='cpu', num_workers=0):
-    dataloader = torch.utils.data.DataLoader(
-        dset, batch_size=batch_size, shuffle=False, num_workers=num_workers, worker_init_fn=seed_worker)
+    dataloader = torch.utils.data.DataLoader(dset, batch_size=batch_size,
+                                             shuffle=False, num_workers=num_workers,
+                                             worker_init_fn=seed_worker)
     m, s = fid.calculate_activation_statistics_dataloader(dataloader, get_feature_map_fn, dims=dims, device=device)
     return m, s
 
@@ -139,7 +141,7 @@ def main():
     device = torch.device(config["device"])
     print("Using device {}".format(device))
 
-    # Setup dataset (binary classification for MNIST, e.g. 5 vs 3)
+    # Load dataset for binary classification (e.g., MNIST 5 vs. 3)
     pos_class = config["dataset"].get("binary", {}).get("pos", None)
     neg_class = config["dataset"].get("binary", {}).get("neg", None)
     dataset, num_classes, img_size = load_dataset(config["dataset"]["name"], config["data-dir"], pos_class, neg_class)
@@ -173,7 +175,7 @@ def main():
         setup_reprod(seed)
         config["model"]["image-size"] = img_size
 
-        # Construct and train baseline GAN (Step 1)
+        # Train baseline GAN (Step 1)
         G, D = construct_gan(config["model"], img_size, device)
         g_optim, d_optim = construct_optimizers(config["optimizer"], G, D)
         g_crit, d_crit = construct_loss(config["model"]["loss"], D)
@@ -208,7 +210,6 @@ def main():
                            'test-noise': test_noise_conf,
                        })
 
-            # Train the baseline GAN and get the training state (which includes best_epoch)
             step_1_train_state, _, _, _ = train(
                 config, dataset, device, n_epochs, batch_size,
                 G, g_optim, g_updater,
@@ -225,10 +226,9 @@ def main():
 
         # ---- Step 2: Modified GAN Training (GASTeN v2) ----
         print(" > Start step 2 (GAN with modified loss)")
-        # For step 2, use only the first checkpoint epoch from step-1 and the first classifier
+        # Use only the first checkpoint epoch from step 1
         step_1_epochs = config['train']['step-2'].get('step-1-epochs', ["best"])
         s1_epoch_str = step_1_epochs[0]
-        # Convert the s1_epoch string to an integer using the step_1_train_state
         if s1_epoch_str == "best":
             epoch = step_1_train_state['best_epoch']
         elif s1_epoch_str == "last":
@@ -236,21 +236,20 @@ def main():
         else:
             epoch = int(s1_epoch_str)
 
-        # Get the GAN checkpoint path for the chosen epoch
         gan_checkpoint_path = get_gan_path_at_epoch(original_gan_cp_dir, epoch=epoch)
 
-        # Use only a single classifier: take the first one from the list.
+        # Use only a single classifier: choose the first one.
         classifier_path = config['train']['step-2']['classifier'][0]
         C_name = os.path.splitext(os.path.basename(classifier_path))[0]
         C, C_params, C_stats, C_args = construct_classifier_from_checkpoint(classifier_path, device=device)
         C.to(device)
         C.eval()
 
-        # Define a simple feature-map extraction function using the single classifier
+        # Feature-map extraction: Pool spatial dimensions and flatten to a 1D prediction.
         def get_feature_map_fn(images, batch_idx, batch_size):
             output = C(images, output_feature_maps=True)
-            feature_map = output[-2]  # shape: (batch_size, dims, h, w)
-            pooled = torch.nn.functional.adaptive_avg_pool2d(feature_map, output_size=(1, 1))
+            feature_map = output[-2]  # shape: (batch, dims, h, w)
+            pooled = torch.nn.functional.adaptive_avg_pool2d(feature_map, (1, 1))
             return pooled.view(pooled.size(0), -1)
 
         dims = get_feature_map_fn(dataset.data[0:1].to(device), 0, 1).size(1)
@@ -259,7 +258,7 @@ def main():
         print("   ... done")
         our_class_fid = fid.FID(get_feature_map_fn, dims, test_noise.size(0), mu, sigma, device=device)
 
-        # Use the classifier directly to compute confusion loss (ACD)
+        # Compute additional metrics using the classifier.
         conf_dist = LossSecondTerm(C)
         fid_metrics = {
             'fid': original_fid,
@@ -269,7 +268,6 @@ def main():
         }
         c_out_hist = OutputsHistogram(C, test_noise.size(0))
 
-        # Use only one weight setting (which must be a dictionary for gaussian loss)
         weight = config['train']['step-2']['weight'][0]
         eval_metrics = train_modified_gan(config, dataset, cp_dir,
                                           gan_checkpoint_path,
@@ -278,7 +276,6 @@ def main():
                                           weight, fixed_noise, num_classes, device,
                                           step_2_seeds[i], run_id, epoch)
 
-        # Wrap the evaluation metrics in a DataFrame for logging/plotting
         step2_metrics = pd.DataFrame({
             'fid': eval_metrics.stats['fid'],
             'conf_dist': eval_metrics.stats['conf_dist'],
@@ -292,4 +289,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
