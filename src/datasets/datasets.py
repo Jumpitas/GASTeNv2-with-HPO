@@ -33,3 +33,6 @@ def get_cifar10(dataroot, train=True):
                                            ]))
 
     return dataset
+
+def get_stl10(dataroot, train =True):
+    dataset = torchivision.datasets.STL10(root=dataroot, download=True, train=train,transform=torchvision)

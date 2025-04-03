@@ -7,6 +7,7 @@ dataset_2_fn = {
     'mnist': get_mnist,
     'fashion-mnist': get_fashion_mnist,
     'cifar10': get_cifar10,
+    'stl-10' : get_stl10,
 }
 
 

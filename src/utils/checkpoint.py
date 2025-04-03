@@ -67,6 +67,9 @@ def construct_classifier_from_checkpoint(path, device=None, optimizer=False):
 
 
 def construct_gan_from_checkpoint(path, device=None):
+    import os, json, torch, torch.optim as optim
+    from src.gan import construct_gan
+
     print("Loading GAN from {} ...".format(path))
     with open(os.path.join(path, 'config.json'), 'r') as config_file:
         config = json.load(config_file)
@@ -74,18 +77,21 @@ def construct_gan_from_checkpoint(path, device=None):
     model_params = config['model']
     optim_params = config['optimizer']
 
-    gen_cp = torch.load(os.path.join(
-        path, 'generator.pth'), map_location=device)
-    dis_cp = torch.load(os.path.join(
-        path, 'discriminator.pth'), map_location=device)
+    gen_cp = torch.load(os.path.join(path, 'generator.pth'), map_location=device)
+    dis_cp = torch.load(os.path.join(path, 'discriminator.pth'), map_location=device)
 
-    G, D = construct_gan(
-        model_params, tuple(config['model']['image-size']), device=device)
+    # Try to retrieve the image size from the configuration using two possible key names.
+    if 'image-size' in model_params:
+        image_size = tuple(model_params['image-size'])
+    elif 'image_size' in model_params:
+        image_size = tuple(model_params['image_size'])
+    else:
+        raise KeyError("Could not find 'image-size' or 'image_size' in model configuration.")
 
-    g_optim = optim.Adam(G.parameters(), lr=optim_params["lr"], betas=(
-        optim_params["beta1"], optim_params["beta2"]))
-    d_optim = optim.Adam(D.parameters(), lr=optim_params["lr"], betas=(
-        optim_params["beta1"], optim_params["beta2"]))
+    G, D = construct_gan(model_params, image_size, device=device)
+
+    g_optim = optim.Adam(G.parameters(), lr=optim_params["lr"], betas=(optim_params["beta1"], optim_params["beta2"]))
+    d_optim = optim.Adam(D.parameters(), lr=optim_params["lr"], betas=(optim_params["beta1"], optim_params["beta2"]))
 
     G.load_state_dict(gen_cp['state'])
     D.load_state_dict(dis_cp['state'])
@@ -96,6 +102,7 @@ def construct_gan_from_checkpoint(path, device=None):
     D.eval()
 
     return G, D, g_optim, d_optim
+
 
 
 def get_gan_path_at_epoch(output_dir, epoch=None):

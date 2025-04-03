@@ -20,19 +20,19 @@ from src.utils.checkpoint import (construct_gan_from_checkpoint, construct_class
                                   get_gan_path_at_epoch, load_gan_train_state)
 from src.gan import construct_gan, construct_loss
 
-
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", dest="config_path",
                         required=True, help="Path to config file")
+    # Flag to disable plotting/saving images
+    parser.add_argument("--no-plots", action="store_true",
+                        help="Disable creation of images for plots")
     return parser.parse_args()
-
 
 def construct_optimizers(config, G, D):
     g_optim = torch.optim.Adam(G.parameters(), lr=config["lr"], betas=(config["beta1"], config["beta2"]))
     d_optim = torch.optim.Adam(D.parameters(), lr=config["lr"], betas=(config["beta1"], config["beta2"]))
     return g_optim, d_optim
-
 
 def train_modified_gan(config, dataset, cp_dir, gan_path, test_noise,
                        fid_metrics, c_out_hist,
@@ -40,17 +40,16 @@ def train_modified_gan(config, dataset, cp_dir, gan_path, test_noise,
                        s1_epoch):
     print("Running experiment with classifier {} and weight {} ...".format(C_name, weight))
 
-    # Ensure weight is a dictionary for gaussian loss
+    # Ensure weight is a dictionary for Gaussian loss.
     if not (isinstance(weight, dict) and ("gaussian" in weight or "gaussian-v2" in weight)):
-        raise ValueError(
-            "For GASTeN v2 we require weight to be specified as a dictionary with 'gaussian' or 'gaussian-v2'.")
+        raise ValueError("For GASTeN v2 we require weight to be specified as a dictionary with 'gaussian' or 'gaussian-v2'.")
 
     if "gaussian" in weight:
         weight_txt = 'gauss_' + '_'.join([f'{key}_{value}' for key, value in weight['gaussian'].items()])
     elif "gaussian-v2" in weight:
         weight_txt = 'gauss_v2_' + '_'.join([f'{key}_{value}' for key, value in weight['gaussian-v2'].items()])
 
-    # s1_epoch may be "best", "last", or a number as a string.
+    # Convert s1_epoch ("best", "last", or numeric string) into an integer.
     if s1_epoch == "best":
         epoch = step_1_train_state['best_epoch']
     elif s1_epoch == "last":
@@ -98,7 +97,7 @@ def train_modified_gan(config, dataset, cp_dir, gan_path, test_noise,
                    'seed': seed,
                    'weight': weight_txt,
                    'train': config["train"]["step-2"],
-                   'classifier_loss': C_stats['test_loss'],
+                   'classifier_loss': C_stats.get('test_loss', 0.0),
                    'classifier': C_name,
                    'classifier_args': C_args,
                    'classifier_params': C_params,
@@ -119,7 +118,6 @@ def train_modified_gan(config, dataset, cp_dir, gan_path, test_noise,
 
     wandb.finish()
     return eval_metrics
-
 
 def compute_dataset_fid_stats(dset, get_feature_map_fn, dims, batch_size=64, device='cpu', num_workers=0):
     dataloader = torch.utils.data.DataLoader(dset, batch_size=batch_size,
@@ -226,7 +224,7 @@ def main():
 
         # ---- Step 2: Modified GAN Training (GASTeN v2) ----
         print(" > Start step 2 (GAN with modified loss)")
-        # Use only the first checkpoint epoch from step 1
+        # Use only the first checkpoint epoch from step 1.
         step_1_epochs = config['train']['step-2'].get('step-1-epochs', ["best"])
         s1_epoch_str = step_1_epochs[0]
         if s1_epoch_str == "best":
@@ -266,7 +264,11 @@ def main():
             'conf_dist': conf_dist,
             'hubris': Hubris(C, test_noise.size(0)),
         }
+        # Create OutputsHistogram instance.
         c_out_hist = OutputsHistogram(C, test_noise.size(0))
+        # Disable image plotting if the --no-plots flag is provided.
+        if args.no_plots:
+            c_out_hist = None
 
         weight = config['train']['step-2']['weight'][0]
         eval_metrics = train_modified_gan(config, dataset, cp_dir,
@@ -276,16 +278,18 @@ def main():
                                           weight, fixed_noise, num_classes, device,
                                           step_2_seeds[i], run_id, epoch)
 
-        step2_metrics = pd.DataFrame({
-            'fid': eval_metrics.stats['fid'],
-            'conf_dist': eval_metrics.stats['conf_dist'],
-            'hubris': eval_metrics.stats['hubris'],
-            's1_epochs': [epoch] * len(eval_metrics.stats['fid']),
-            'weight': [str(weight)] * len(eval_metrics.stats['fid']),
-            'classifier': [classifier_path] * len(eval_metrics.stats['fid']),
-            'epoch': [i + 1 for i in range(len(eval_metrics.stats['fid']))]
-        })
-        plot_metrics(step2_metrics, cp_dir, f'{C_name}-{run_id}')
+        # Only plot the final aggregated metrics if plotting is enabled.
+        if not args.no_plots:
+            step2_metrics = pd.DataFrame({
+                'fid': eval_metrics.stats['fid'],
+                'conf_dist': eval_metrics.stats['conf_dist'],
+                'hubris': eval_metrics.stats['hubris'],
+                's1_epochs': [epoch] * len(eval_metrics.stats['fid']),
+                'weight': [str(weight)] * len(eval_metrics.stats['fid']),
+                'classifier': [classifier_path] * len(eval_metrics.stats['fid']),
+                'epoch': [i + 1 for i in range(len(eval_metrics.stats['fid']))]
+            })
+            plot_metrics(step2_metrics, cp_dir, f'{C_name}-{run_id}')
 
 if __name__ == "__main__":
     main()

@@ -6,6 +6,7 @@ from .hubris import Hubris
 from torchvision.transforms import ToTensor
 import PIL
 import pandas as pd
+import numpy as np  # Added for variance calculations
 
 
 class OutputsHistogram(Metric):
@@ -26,7 +27,7 @@ class OutputsHistogram(Metric):
         self.hubris.update(images, batch)
         with torch.no_grad():
             # Call the classifier with output_feature_maps=True.
-            # The expected behavior is to return a tuple: (prediction, feature_map).
+            # Expected behavior: returns a tuple: (prediction, feature_map)
             output = self.C(images, output_feature_maps=True)
             # If the output is a tuple or list, take the first element as predictions.
             if isinstance(output, (tuple, list)):
@@ -46,9 +47,15 @@ class OutputsHistogram(Metric):
         self.y_hat[start_idx:start_idx + batch_size] = c_output
 
     def plot(self):
-        # Display a histogram of classifier outputs.
+        # Display a plot of classifier outputs.
+        data = self.y_hat.cpu().numpy()
+        var = np.var(data)
         plt.figure()
-        sns.histplot(self.y_hat.cpu().numpy(), stat='proportion', bins=20)
+        if var < 1e-6:
+            print(f"Warning: Low variance in classifier outputs (variance={var}). Using histogram instead of KDE.")
+            sns.histplot(data, stat='proportion', bins=20)
+        else:
+            sns.kdeplot(data, fill=True, warn_singular=False)
         plt.title("Classifier Output Distribution")
         plt.xlabel("Prediction")
         plt.ylabel("Proportion")
@@ -61,11 +68,23 @@ class OutputsHistogram(Metric):
         # 3) A bar chart of the computed hubris value.
         fig, axs = plt.subplots(1, 3, figsize=(18, 6))
 
-        sns.kdeplot(self.y_hat.cpu().numpy(), ax=axs[0], fill=True)
+        data = self.y_hat.cpu().numpy()
+        var = np.var(data)
+        if var < 1e-6:
+            print(f"Warning: Low variance in classifier outputs for KDE plot (variance={var}). Using histogram.")
+            sns.histplot(data, ax=axs[0], stat='proportion', bins=20)
+        else:
+            sns.kdeplot(data, ax=axs[0], fill=True, warn_singular=False)
         axs[0].set(xlim=(0.0, 1.0), title="Classifier Output Distribution")
 
         cd = torch.abs(0.5 - self.y_hat)
-        sns.kdeplot(cd.cpu().numpy(), ax=axs[1], fill=True)
+        cd_data = cd.cpu().numpy()
+        var_cd = np.var(cd_data)
+        if var_cd < 1e-6:
+            print(f"Warning: Low variance in confusion distance (variance={var_cd}). Using histogram.")
+            sns.histplot(cd_data, ax=axs[1], stat='proportion', bins=20)
+        else:
+            sns.kdeplot(cd_data, ax=axs[1], fill=True, warn_singular=False)
         axs[1].set(xlim=(0.0, 0.5), title="Confusion Distance Distribution")
 
         hubris_value = self.hubris.finalize()

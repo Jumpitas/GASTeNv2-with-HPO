@@ -16,8 +16,7 @@ class LossSecondTerm(Metric):
             # Instead of unpacking, we take the first element as the prediction.
             output = self.C(images, output_feature_maps=True)
             c_output = output[0]
-        # Use mean() instead of sum() to average over non-batch dimensions.
-        term_2 = (0.5 - c_output).abs().mean().item()
+        term_2 = (0.5 - c_output).sum().abs().item()
         self.acc += term_2
         self.count += images.size(0)
 
