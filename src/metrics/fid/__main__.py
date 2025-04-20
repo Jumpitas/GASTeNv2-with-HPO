@@ -7,8 +7,8 @@ from dotenv import load_dotenv
 from src.metrics import fid
 from src.metrics.fid import get_inception_feature_map_fn
 from src.utils.checkpoint import construct_classifier_from_checkpoint
-from src.datasets import get_mnist, get_fashion_mnist, get_cifar10
-from src.datasets.utils import BinaryDataset
+from src.data_loaders import get_mnist, get_fashion_mnist, get_cifar10, get_stl10, get_chest_xray
+from src.data_loaders.utils import BinaryDataset
 
 
 load_dotenv()
@@ -50,6 +50,10 @@ def main():
         dset = get_fashion_mnist(args.dataroot)
     elif args.dataset == 'cifar10':
         dset = get_cifar10(args.dataroot)
+    elif args.dataset == 'stl10':
+        dset = get_stl10(args.dataroot)
+    elif args.dataset == 'chest-xray':
+        dset = get_chest_xray(args.dataroot)
     else:
         print("invalid dataset", args.dataset)
         exit(-1)

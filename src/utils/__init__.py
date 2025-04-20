@@ -109,26 +109,43 @@ def group_images(images, classifier=None, device=None):
     img = torch.concat(grids, 2)
     return img
 
+
 def begin_classifier(iterator, clf_type, l_epochs, args):
-    # Process number of features as digits
-    l_nf = list(set([nf for nf in args.nf.split(",") if nf.isdigit()]))
-    for neg_class, pos_class in iterator:
-        print(f"\nGenerating classifiers for {pos_class}v{neg_class} ...")
+    # make sure out_dir exists
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    # parse nf and epochs
+    l_nf = [nf for nf in args.nf.split(",") if nf.isdigit()]
+    print("nf candidates:", l_nf)
+    print("epochs candidates:", l_epochs)
+
+    # consume iterator once
+    class_pairs = list(iterator)
+    print("class pairs:", class_pairs)
+
+    for neg_class, pos_class in class_pairs:
+        print(f"\n=== {pos_class} vs {neg_class} ===")
         for nf, epochs in itertools.product(l_nf, l_epochs):
-            print("\n", clf_type, nf, epochs)
-            proc = subprocess.run(["python", "-m", "src.classifier.train",
-                                   "--device", args.device,
-                                   "--data-dir", args.dataroot,
-                                   "--out-dir", args.out_dir,
-                                   "--dataset", args.dataset,
-                                   "--pos", pos_class,
-                                   "--neg", neg_class,   # Fixed: using neg_class instead of pos_class again
-                                   "--classifier-type", clf_type,
-                                   "--nf", nf,
-                                   "--epochs", epochs,
-                                   "--batch-size", str(args.batch_size),
-                                   "--lr", str(args.lr),
-                                   "--seed", str(args.seed)],
-                                  capture_output=True)
-            for line in proc.stdout.split(b'\n')[-4:-1]:
-                print(line.decode())
+            print(f"-- {clf_type} | nf={nf} | epochs={epochs}")
+            cmd = [
+                "python", "-m", "src.classifier.train",
+                "--device",       args.device,
+                "--data-dir",     args.dataroot,
+                "--out-dir",      args.out_dir,
+                "--dataset",      args.dataset,
+                "--pos",          str(pos_class),
+                "--neg",          str(neg_class),
+                "--classifier-type", clf_type,
+                "--nf",           nf,
+                "--epochs",       epochs,
+                "--batch-size",   str(args.batch_size),
+                "--lr",           str(args.lr),
+                "--seed",         str(args.seed),
+            ]
+            print("running:", " ".join(cmd))
+            # run without capture so you see everything
+            result = subprocess.run(cmd, cwd=os.getcwd())
+            if result.returncode != 0:
+                print(f"FAILED (code {result.returncode})")
+            else:
+                print("DONE — check", args.out_dir)

@@ -11,7 +11,7 @@ import sys
 
 from src.utils.config import read_config
 from src.gan import construct_gan, construct_loss
-from src.datasets import load_dataset
+from src.data_loaders import load_dataset
 from src.gan.update_g import UpdateGeneratorGAN
 from src.metrics import fid
 import math
@@ -100,16 +100,107 @@ def main():
     train_metrics.add('G_loss', iteration_metric=True)
     train_metrics.add('D_loss', iteration_metric=True)
 
-    for loss_term in UpdateGeneratorGAN(construct_loss(config["model"]["loss"], None)[0]).get_loss_terms():
-        train_metrics.add(loss_term, iteration_metric=True)
+    def train(params: Configuration, seed) -> float:
+        setup_reprod(seed)
+        config['model']["architecture"]['g_num_blocks'] = params['n_blocks']
+        config['model']["architecture"]['d_num_blocks'] = params['n_blocks']
 
-    for loss_term in construct_loss(config["model"]["loss"], None)[1].get_loss_terms():
-        train_metrics.add(loss_term, iteration_metric=True)
+        G, D = construct_gan(config["model"], img_size, device)
 
-    for metric_name in fid_metrics.keys():
-        eval_metrics.add(metric_name)
+        g_crit, d_crit = construct_loss(config["model"]["loss"], D)
+        g_updater = UpdateGeneratorGAN(g_crit)
 
-    eval_metrics.add_media_metric('samples')
+        # Initialize optimizers
+        g_opt = Adam(G.parameters(), lr=params['g_lr'], betas=(params['g_beta1'], params['g_beta2']))
+        d_opt = Adam(D.parameters(), lr=params['d_lr'], betas=(params['d_beta1'], params['d_beta2']))
+
+        train_state = {
+            'epoch': 0,
+            'best_epoch': 0,
+            'best_epoch_metric': float('inf'),
+        }
+
+        for loss_term in g_updater.get_loss_terms():
+            train_metrics.add(loss_term, iteration_metric=True)
+
+        for loss_term in d_crit.get_loss_terms():
+            train_metrics.add(loss_term, iteration_metric=True)
+
+        for metric_name in fid_metrics.keys():
+            eval_metrics.add(metric_name)
+
+        eval_metrics.add_media_metric('samples')
+
+        G.train()
+        D.train()
+
+        g_iters_per_epoch = int(math.floor(len(dataloader) / n_disc_iters))
+        iters_per_epoch = g_iters_per_epoch * n_disc_iters
+
+        epochs = 11
+        for epoch in range(1, epochs):
+            data_iter = iter(dataloader)
+            curr_g_iter = 0
+
+            for i in range(1, iters_per_epoch + 1):
+                data, _ = next(data_iter)
+                real_data = data.to(device)
+
+                ###
+                # Update Discriminator
+                ###
+                d_loss, d_loss_terms = train_disc(
+                    G, D, d_opt, d_crit, real_data, batch_size, train_metrics, device)
+
+                ###
+                # Update Generator
+                # - update every 'n_disc_iterators' consecutive D updates
+                ###
+                if i % n_disc_iters == 0:
+                    curr_g_iter += 1
+
+                    g_loss, g_loss_terms = train_gen(g_updater,
+                                                     G, D, g_opt, batch_size, train_metrics, device)
+
+                    ###
+                    # Log stats
+                    ###
+                    if curr_g_iter % log_every_g_iter == 0 or \
+                            curr_g_iter == g_iters_per_epoch:
+                        print('[%d/%d][%d/%d]\tG loss: %.4f %s; D loss: %.4f %s'
+                              % (epoch, epochs-1, curr_g_iter, g_iters_per_epoch, g_loss.item(),
+                                 loss_terms_to_str(g_loss_terms), d_loss.item(),
+                                 loss_terms_to_str(d_loss_terms)))
+
+            ###
+            # Sample images
+            ###
+            with torch.no_grad():
+                G.eval()
+                fake = G(fixed_noise).detach().cpu()
+                G.train()
+
+            img = group_images(fake, classifier=None, device=device)
+            eval_metrics.log_image('samples', img)
+
+            ###
+            # Evaluate after epoch
+            ###
+            train_state['epoch'] += 1
+
+            train_metrics.finalize_epoch()
+
+            evaluate(G, fid_metrics, eval_metrics, batch_size,
+                     test_noise, device, None)
+
+            eval_metrics.finalize_epoch()
+
+        config_checkpoint_dir = os.path.join(cp_dir, str(params.config_id))
+        checkpoint_gan(
+            G, D, g_opt, d_opt, train_state,
+            {"eval": eval_metrics.stats, "train": train_metrics.stats}, config, output_dir=config_checkpoint_dir)
+
+        return eval_metrics.stats['fid'][epochs-2]
 
     G_lr = Float("g_lr", (1e-4, 1e-3), default=0.0002)
     D_lr = Float("d_lr", (1e-4, 1e-3), default=0.0002)
@@ -122,15 +213,22 @@ def main():
     configspace = ConfigurationSpace()
     configspace.add_hyperparameters([G_lr, D_lr, G_beta1, D_beta1, G_beta2, D_beta2, n_blocks])
 
-    scenario = Scenario(configspace, deterministic=True, n_trials=10000, walltime_limit=72000)
+    scenario = Scenario(configspace, deterministic=True, n_trials=500, walltime_limit=3600)
 
     smac = HyperparameterOptimizationFacade(scenario, train, overwrite=True)
     incumbent = smac.optimize()
 
     best_config = incumbent.get_dictionary()
 
-    with open(f'{os.environ["FILESDIR"]}/step-1-best-config-bayesian-{pos_class}v{neg_class}.txt', 'w') as file:
+    filename = os.path.join(
+        os.environ["FILESDIR"],
+        f'step-1-best-config-bayesian-{pos_class}v{neg_class}-{run_id}.txt'
+    )
+
+    with open(filename, 'w') as file:
         file.write(os.path.join(cp_dir, str(incumbent.config_id)))
+
+    print(f"Saved best config to {filename}")
 
     print("Best Configuration:", best_config)
     print("Best Configuration id:", incumbent.config_id)
@@ -140,4 +238,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

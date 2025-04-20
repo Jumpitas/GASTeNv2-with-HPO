@@ -1,6 +1,6 @@
 import os
 import yaml
-from src.datasets import valid_dataset
+from src.data_loaders import valid_dataset
 from src.gan.loss import valid_loss
 from schema import Schema, SchemaError, Optional, And, Or
 
@@ -25,23 +25,34 @@ config_schema = Schema({
     },
     "model": {
         "z_dim": int,
-        "architecture": Or({
-            "name": "dcgan",
-            "g_filter_dim": int,
-            "d_filter_dim": int,
-            "g_num_blocks": int,
-            "d_num_blocks": int,
-        }, {
-            "name": "dcgan-v2",
-            "g_filter_dim": int,
-            "d_filter_dim": int,
-            "g_num_blocks": int,
-            "d_num_blocks": int,
-        }, {
-            "name": "resnet",
-            "g_filter_dim": int,
-            "d_filter_dim": int,
-        }),
+        "architecture": Or(
+            {
+                "name": "dcgan",
+                "g_filter_dim": int,
+                "d_filter_dim": int,
+                "g_num_blocks": int,
+                "d_num_blocks": int,
+            },
+            {
+                "name": "dcgan-v2",
+                "g_filter_dim": int,
+                "d_filter_dim": int,
+                "g_num_blocks": int,
+                "d_num_blocks": int,
+            },
+            {
+                "name": "resnet",
+                "g_filter_dim": int,
+                "d_filter_dim": int,
+            },
+            {
+                "name": "chest-xray",
+                "g_filter_dim": int,
+                "d_filter_dim": int,
+                "g_num_blocks": int,
+                "d_num_blocks": int,
+            }
+        ),
         "loss": Or({
             "name": "wgan-gp",
             "args": {
@@ -67,7 +78,6 @@ config_schema = Schema({
             }
         }),
         "step-2": {
-            # TODO
             Optional("step-1-epochs", default="best"): [Or(int, "best", "last")],
             Optional("early-stop"): {
                 "criteria": int,
@@ -84,7 +94,7 @@ config_schema = Schema({
                 "mgda",
                 "mgda:norm",
                 {"kldiv": {"alpha": float}},
-                {"gaussian-v2": {"alpha": float, "var": float}},
+                {"gaussian-v2": {"alpha": float, "var": float}}
             )]
         }
     }
@@ -94,9 +104,10 @@ def read_config(path):
     with open(path, 'r') as file:
         config = yaml.safe_load(file)
         # add paths
-        for rel_path in ['out-dir', 'data-dir', 'fid-stats-path', 'test-noise'] :
+        for rel_path in ['out-dir', 'data-dir', 'fid-stats-path', 'test-noise']:
             config[rel_path] = os.environ['FILESDIR'] + '/' + config[rel_path]
-        config['train']['step-2']['classifier'] = [(os.environ['FILESDIR'] + '/' + rel_path) for rel_path in config['train']['step-2']['classifier']]
+        config['train']['step-2']['classifier'] = [
+            os.environ['FILESDIR'] + '/' + rel_path for rel_path in config['train']['step-2']['classifier']]
         os.makedirs(config['out-dir'], exist_ok=True)
     try:
         config_schema.validate(config)

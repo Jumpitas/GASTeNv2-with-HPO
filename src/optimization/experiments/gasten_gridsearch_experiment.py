@@ -11,7 +11,7 @@ import numpy as np
 
 from src.utils.config import read_config
 from src.gan import construct_gan, construct_loss
-from src.datasets import load_dataset
+from src.load_dataset import load_dataset
 from src.gan.update_g import UpdateGeneratorGAN
 from src.metrics import fid
 from src.utils import MetricsLogger, group_images

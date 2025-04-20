@@ -8,7 +8,7 @@ import torch
 import wandb
 
 from src.metrics import fid, LossSecondTerm, Hubris
-from src.datasets import load_dataset
+from src.load_dataset import load_dataset
 from src.gan.train import train
 from src.gan.update_g import (UpdateGeneratorGAN, UpdateGeneratorGASTEN_gaussian,
                               UpdateGeneratorGASTEN_gaussianV2)

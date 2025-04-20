@@ -10,7 +10,7 @@ import os
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from src.datasets import load_dataset
+from src.data_loaders import load_dataset
 from src.metrics.accuracy import binary_accuracy, multiclass_accuracy
 from src.utils import setup_reprod
 from src.utils.checkpoint import checkpoint, construct_classifier_from_checkpoint
