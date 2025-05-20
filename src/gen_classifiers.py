@@ -12,7 +12,7 @@ parser.add_argument('--data-dir', dest='dataroot',
 parser.add_argument('--out-dir', dest='out_dir',
                     default=f"{os.environ['FILESDIR']}/models", help='Path to generated files')
 parser.add_argument('--dataset', dest='dataset',
-                    default='mnist', help='Dataset (mnist or fashion-mnist or cifar10 or stl10 or chest-xray)')
+                    default='mnist', help='Dataset (mnist or fashion-mnist or cifar10 or stl10 or chest-xray or imagenet)')
 parser.add_argument('--n-classes', dest='n_classes',
                     type=int, default=10, help='Number of classes in dataset')
 parser.add_argument('--device', type=str, default='cpu',

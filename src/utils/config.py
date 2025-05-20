@@ -51,6 +51,20 @@ config_schema = Schema({
                 "d_filter_dim": int,
                 "g_num_blocks": int,
                 "d_num_blocks": int,
+            },
+            {
+                "name": "stl10_sagan",
+                "g_filter_dim": int,
+                "d_filter_dim": int,
+                "g_num_blocks": int,
+                "d_num_blocks": int,
+            },
+            {
+                "name": "imagenet",
+                "g_filter_dim": int,
+                "d_filter_dim": int,
+                "g_num_blocks": int,
+                "d_num_blocks": int,
             }
         ),
         "loss": Or({
