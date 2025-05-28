@@ -72,6 +72,8 @@ def train_disc(G, D, d_opt, d_crit, real_data,
     # Compute loss, gradients and update net
     d_loss, d_loss_terms = d_crit(real_data, fake_data,
                                   d_output_real, d_output_fake, device)
+    torch.autograd.set_detect_anomaly(True)
+
     d_loss.backward()
     d_opt.step()
 

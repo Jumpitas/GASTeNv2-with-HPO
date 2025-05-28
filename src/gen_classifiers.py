@@ -41,6 +41,10 @@ def main():
     args = parser.parse_args()
     print("Arguments:", args)
 
+    args.out_dir = os.path.abspath(args.out_dir)
+    os.makedirs(args.out_dir, exist_ok=True)
+    print(f"→ saving everything under: {args.out_dir}")
+
     # Ensure n_classes is an integer
     try:
         n_classes = int(args.n_classes)
@@ -56,18 +60,21 @@ def main():
     print("Epochs list:", l_epochs)
     print("Classifier types list:", l_clf_type)
 
-    # Create an iterator over class pairs
+    # Build a list of class-pairs
     if args.pos_class is not None and args.neg_class is not None:
-        iterator = iter([(str(args.neg_class), str(args.pos_class))])
+        class_pairs = [(str(args.neg_class), str(args.pos_class))]
         print("Using fixed binary pair: ({} vs {})".format(args.neg_class, args.pos_class))
     else:
-        iterator = itertools.combinations(range(n_classes), 2)
+        class_pairs = [
+            (str(i), str(j))
+            for i, j in itertools.combinations(range(n_classes), 2)
+        ]
         print("Using all combinations for {} classes".format(n_classes))
 
-    # Always use begin_classifier regardless of input type
+    # Kick off one run per classifier type, each with its own iterator
     for clf_type in l_clf_type:
         print("Processing classifier type:", clf_type)
-        begin_classifier(iterator, clf_type, l_epochs, args)
+        begin_classifier(iter(class_pairs), clf_type, l_epochs, args)
 
 if __name__ == '__main__':
     main()

@@ -36,8 +36,8 @@ optimizer:
 
 train:
   step-1:
-    epochs: 5
-    checkpoint-every: 1
+    epochs: 10
+    checkpoint-every: 2
     disc-iters: 1
     batch-size: 32
 
