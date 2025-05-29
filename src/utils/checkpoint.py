@@ -34,7 +34,7 @@ def checkpoint(model, model_name, model_params, train_stats, args, output_dir=No
 
 
 def load_checkpoint(path, model, device=None, optimizer=None):
-    cp = torch.load(path, map_location=device, weights_load=False)
+    cp = torch.load(path, map_location=device, weights_only=False)
 
     model.load_state_dict(cp['state'])
     model.eval()  # just to be safe
@@ -44,7 +44,7 @@ def load_checkpoint(path, model, device=None, optimizer=None):
 
 
 def construct_classifier_from_checkpoint(path, device=None, optimizer=False):
-    cp = torch.load(os.path.join(path, 'classifier.pth'), map_location=device, weights_load=False)
+    cp = torch.load(os.path.join(path, 'classifier.pth'), map_location=device, weights_only=False)
 
     print(" > Loading model from {} ...".format(path))
 
