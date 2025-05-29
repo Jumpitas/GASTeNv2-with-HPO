@@ -34,7 +34,7 @@ def checkpoint(model, model_name, model_params, train_stats, args, output_dir=No
 
 
 def load_checkpoint(path, model, device=None, optimizer=None):
-    cp = torch.load(path, map_location=device)
+    cp = torch.load(path, map_location=device, weights_load=False)
 
     model.load_state_dict(cp['state'])
     model.eval()  # just to be safe
@@ -44,7 +44,7 @@ def load_checkpoint(path, model, device=None, optimizer=None):
 
 
 def construct_classifier_from_checkpoint(path, device=None, optimizer=False):
-    cp = torch.load(os.path.join(path, 'classifier.pth'), map_location=device)
+    cp = torch.load(os.path.join(path, 'classifier.pth'), map_location=device, weights_load=False)
 
     print(" > Loading model from {} ...".format(path))
 
@@ -77,8 +77,8 @@ def construct_gan_from_checkpoint(path, device=None):
     model_params = config['model']
     optim_params = config['optimizer']
 
-    gen_cp = torch.load(os.path.join(path, 'generator.pth'), map_location=device)
-    dis_cp = torch.load(os.path.join(path, 'discriminator.pth'), map_location=device)
+    gen_cp = torch.load(os.path.join(path, 'generator.pth'), map_location=device, weights_only=False)
+    dis_cp = torch.load(os.path.join(path, 'discriminator.pth'), map_location=device, weights_only=False)
 
     # Try to retrieve the image size from the configuration using two possible key names.
     if 'image-size' in model_params:
