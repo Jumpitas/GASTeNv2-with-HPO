@@ -181,7 +181,7 @@ def main():
         Float("alpha", (0.0, 5.0), default=1.0),
         Float("var",   (1e-4, 1.0), default=0.01),
     ])
-    scenario = Scenario(cs, deterministic=True, n_trials=50, walltime_limit=3600)
+    scenario = Scenario(cs, deterministic=True, n_trials=50, walltime_limit=72000)
     smac = HyperparameterOptimizationFacade(scenario, step2_obj, overwrite=True)
     incumbent = smac.optimize()
     best = incumbent.get_dictionary()
