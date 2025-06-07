@@ -11,7 +11,7 @@ def construct_classifier(params, device=None):
         C = SimpleCNN(params['img_size'], [params['nf'], params['nf'] * 2], n_classes)
 
     elif t == 'mlp':
-        C = MyMLP(params['img_size'], n_classes, [params['nf'], params['nf'] * 2])
+        C = MyMLP(params['img_size'], n_classes, params['nf'])
 
     elif t == 'resnet18_frozen':
         # freeze all layers except final fc

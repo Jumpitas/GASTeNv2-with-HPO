@@ -27,7 +27,7 @@ model:
     g_num_blocks: 3
     d_num_blocks: 3
   loss:
-    name: ns
+    name: hinge-r1
 
 optimizer:
   lr: 0.0002
