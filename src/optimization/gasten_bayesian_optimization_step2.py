@@ -123,7 +123,7 @@ def main():
     pos_class = ds_cfg["binary"]["pos"]
     neg_class = ds_cfg["binary"]["neg"]
     # find the step1 best‐config file (with any run_id suffix)
-    pattern = f"results/step-1-best-config-{dataset_name}-bayesian-{pos_class}v{neg_class}-*.txt"
+    pattern = f"results/step-1-best-config-{dataset_name}-{pos_class}v{neg_class}.txt"
     files   = glob.glob(pattern)
     if not files:
         raise FileNotFoundError("No step‐1 best‐config file matching " + pattern)
@@ -177,7 +177,7 @@ def main():
             C, os.path.basename(clf_path), C_params, C_stats, C_args,
             weight, fixed_noise, num_classes, device, seed, wandb.util.generate_id()
         )
-        return em.stats['fid'][-1]
+        return min(em.stats['fid'])
 
     # Bayesian over alpha∈[0,5], var∈[1e-4,1]
     cs = ConfigurationSpace()

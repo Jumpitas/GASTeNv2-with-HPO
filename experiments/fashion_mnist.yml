@@ -8,7 +8,7 @@ fixed-noise: 2500
 device: cuda:0
 num-workers: 6
 
-fid-stats-path: data/fid-stats/stats.inception.fashion-mnist.4v2.npz
+fid-stats-path: data/fid-stats/stats.inception.fashion-mnist.5v3.npz
 
 num-runs: 1
 
@@ -46,7 +46,7 @@ train:
     checkpoint-every: 10
     batch-size: 64
     disc-iters: 1
-    classifier: ["models/cnn-12-12.4441"]
+    classifier: ["models/fashion-mnist/7v1/cnn-12-12.4441"]
     weight:
       - gaussian:
           alpha: 1.0

@@ -120,7 +120,7 @@ def main():
 
         G.train(); D.train()
         iters_per_epoch = (len(dataloader) // n_disc_iters) * n_disc_iters
-        epochs = config['train']['step-1'].get('epochs', 11)
+        epochs = config['train']['step-1'].get('epochs', 30)
 
         for epoch in range(1, epochs):
             data_iter = iter(dataloader)
@@ -170,22 +170,22 @@ def main():
     # hyperparameter space
     cs = ConfigurationSpace()
     cs.add_hyperparameters([
-        Float("g_lr", (1e-4, 1e-3), default=0.0002),
-        Float("d_lr", (1e-4, 1e-3), default=0.0002),
-        Float("g_beta1", (0.1, 1), default=0.5),
-        Float("d_beta1", (0.1, 1), default=0.5),
-        Float("g_beta2", (0.1, 1), default=0.999),
-        Float("d_beta2", (0.1, 1), default=0.999),
-        Integer("n_blocks", (1, 5), default=3),
+        Float("g_lr", (1e-4, 5e-4), default=2e-4, log=True),
+        Float("d_lr", (1e-4, 5e-4), default=2e-4, log=True),
+        Float("g_beta1", (0.0, 0.9), default=0.5),
+        Float("d_beta1", (0.0, 0.9), default=0.5),
+        Float("g_beta2", (0.9, 0.9999), default=0.999),
+        Float("d_beta2", (0.9, 0.9999), default=0.999),
+        Integer("n_blocks", (1, 4), default=3),
     ])
-    scenario = Scenario(cs, deterministic=True, n_trials=1, walltime_limit=7200)
+    scenario = Scenario(cs, deterministic=True, n_trials=50, walltime_limit=7200)
     smac = HyperparameterOptimizationFacade(scenario, train, overwrite=True)
     incumbent = smac.optimize()
 
     best_config = dict(incumbent)
     out_file = os.path.join(
         os.environ['FILESDIR'],
-        f"step-1-best-config-{dataset_name}-bayesian-{pos_class}v{neg_class}-{run_id}.txt"
+        f"step-1-best-config-{dataset_name}-{pos_class}v{neg_class}.txt"
     )
     with open(out_file, 'w') as f:
         f.write(os.path.join(cp_dir, str(incumbent.config_id)))

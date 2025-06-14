@@ -123,7 +123,7 @@ def train(C, opt, crit, train_loader, val_loader, test_loader, acc_fun, args, na
             stats['best_epoch'] = epoch
             stats['early_stop_tracker'] = 0
 
-            cp_path = checkpoint(C, name, model_params, stats, args, output_dir=args.out_dir)
+            cp_path = checkpoint(C, name, model_params, stats, args, output_dir=out_dir)
             print("")
             print(' > Saved checkpoint to {}'.format(cp_path))
         else:
