@@ -1,5 +1,3 @@
-# src/gan/__init__.py
-
 from src.gan.architectures.dcgan import Generator as DC_G, Discriminator as DC_D
 from src.gan.architectures.dcgan_v2 import Generator as DC_G2, Discriminator as DC_D2
 from src.gan.architectures.resnet import Generator as RN_G, Discriminator as RN_D
@@ -12,6 +10,7 @@ from src.gan.loss import (
     NS_DiscriminatorLoss,
     W_GeneratorLoss,
     WGP_DiscriminatorLoss,
+    HingeR1_DiscriminatorLoss,
 )
 
 
@@ -110,9 +109,17 @@ def construct_gan(config, img_size, device):
 
 
 def construct_loss(config, D):
-    if config["name"] == "ns":
+    name = config["name"].lower()
+    if name == "ns":
         return NS_GeneratorLoss(), NS_DiscriminatorLoss()
-    elif config["name"] == "wgan-gp":
+
+    elif name == "wgan-gp":
         return W_GeneratorLoss(), WGP_DiscriminatorLoss(D, config["args"]["lambda"])
+
+    elif name == "hinge-r1":
+        # Hinge discriminator + R1 penalty
+        lmbda = config["args"]["lambda"]
+        return W_GeneratorLoss(), HingeR1_DiscriminatorLoss(D, lmbda)
+
     else:
         raise ValueError(f"Unsupported loss: {config['name']}")

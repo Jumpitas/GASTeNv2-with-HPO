@@ -3,7 +3,6 @@ import torch.nn.functional as F
 from torch.distributions import Categorical, kl_divergence
 from .metric import Metric
 
-
 class Hubris(Metric):
     def __init__(self, C, dataset_size):
         super().__init__()
@@ -24,7 +23,9 @@ class Hubris(Metric):
     def _kl(self, p, q):
         return kl_divergence(Categorical(probs=p), Categorical(probs=q)).mean()
 
-    def compute(self, preds, ref_preds=None):
+    def compute(self, ref_preds=None):
+        """Compute hubris from the stored self.preds vector."""
+        preds = self.preds
         binary_preds = torch.stack((preds, 1.0 - preds), dim=1)
 
         if ref_preds is None:
@@ -38,15 +39,18 @@ class Hubris(Metric):
         ref_kl = self._kl(worst, reference)
         amb_kl = self._kl(binary_preds, reference)
 
-        return 1.0 - torch.exp(-(amb_kl / ref_kl)).item()
+        return 1.0 - torch.exp(-(amb_kl / ref_kl))
 
     def finalize(self):
-        self.result = torch.tensor(self.compute(self.preds))
+        # no args, compute uses self.preds
+        val = self.compute()
+        # unwrap tensor → Python float
+        self.result = val.item() if isinstance(val, torch.Tensor) else float(val)
         return self.result
 
     def get_clfs(self):
         return []
 
     def reset(self):
-        self.result = torch.tensor(1.0)
+        self.result = 1.0
         self.preds = torch.zeros(self.dataset_size, dtype=torch.float32)

@@ -3,20 +3,21 @@ name: stl10_hpo_test
 out-dir: out
 data-dir: data
 test-noise: data/z/z_2048_64
-fixed-noise: 2500
+fixed-noise: 64
+compute-fid: false
 
 device: cuda:0
 num-workers: 6
 
-fid-stats-path: data/fid-stats/stats.inception.stl10.5v3.npz
+fid-stats-path: data/fid-stats/stats.inception.stl10.7v1.npz
 
 num-runs: 1
 
 dataset:
   name: stl10
   binary:
-    pos: 5
-    neg: 3
+    pos: 7
+    neg: 1
 
 model:
   z_dim: 64
@@ -28,6 +29,8 @@ model:
     d_num_blocks: 3
   loss:
     name: hinge-r1
+    args :
+      lambda: 10.0
 
 optimizer:
   lr: 0.0002
@@ -52,4 +55,4 @@ train:
       - gaussian:
           alpha: 1.0
           var: 0.01
-    classifier: ["models/stl10.3v5/cnn-12-50.4441"]
+    classifier: ["models/stl10.7v1/cnn-32-10.4441"]

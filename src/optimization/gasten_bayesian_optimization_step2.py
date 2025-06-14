@@ -118,8 +118,12 @@ def main():
     config = read_config(args.config_path)
     print("Loaded config:", args.config_path)
 
+    ds_cfg = config["dataset"]
+    dataset_name = ds_cfg["name"]
+    pos_class = ds_cfg["binary"]["pos"]
+    neg_class = ds_cfg["binary"]["neg"]
     # find the step1 best‐config file (with any run_id suffix)
-    pattern = f"results/step-1-best-config-bayesian-{config['dataset']['binary']['pos']}v{config['dataset']['binary']['neg']}-*.txt"
+    pattern = f"results/step-1-best-config-{dataset_name}-bayesian-{pos_class}v{neg_class}-*.txt"
     files   = glob.glob(pattern)
     if not files:
         raise FileNotFoundError("No step‐1 best‐config file matching " + pattern)

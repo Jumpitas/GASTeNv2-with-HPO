@@ -8,15 +8,15 @@ fixed-noise: 2500
 device: cuda:0
 num-workers: 0
 
-fid-stats-path: data/fid-stats/stats.inception.mnist.5v3.npz
+fid-stats-path: data/fid-stats/stats.inception.mnist.7v1.npz
 
 num-runs: 1
 
 dataset:
   name: mnist
   binary:
-    pos: 5
-    neg: 3
+    pos: 7
+    neg: 1
 
 optimizer:
   lr: 0.0002
@@ -51,4 +51,4 @@ train:
       - gaussian:
           alpha: 1.0
           var: 0.01
-    classifier: ["models/mnist.5v3/cnn-4-50.4441"]
+    classifier: ["models/mnist/7v1/cnn-12-5.4441"]

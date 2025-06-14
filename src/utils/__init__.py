@@ -2,6 +2,7 @@ import os
 from datetime import datetime
 import itertools
 import random
+import sys
 import torch
 import torch.nn as nn
 import numpy as np
@@ -127,21 +128,21 @@ def begin_classifier(iterator, clf_type, l_epochs, args):
         print(f"\n=== {pos_class} vs {neg_class} ===")
         for nf, epochs in itertools.product(l_nf, l_epochs):
             print(f"-- {clf_type} | nf={nf} | epochs={epochs}")
-            cmd = [
-                "python", "-m", "src.classifier.train",
+            cmd = list(map(str, [
+                sys.executable, "-m", "src.classifier.train",
                 "--device",       args.device,
                 "--data-dir",     args.dataroot,
                 "--out-dir",      args.out_dir,
                 "--dataset",      args.dataset,
-                "--pos",          str(pos_class),
-                "--neg",          str(neg_class),
+                "--pos",          pos_class,
+                "--neg",          neg_class,
                 "--classifier-type", clf_type,
                 "--nf",           nf,
                 "--epochs",       epochs,
-                "--batch-size",   str(args.batch_size),
-                "--lr",           str(args.lr),
-                "--seed",         str(args.seed),
-            ]
+                "--batch-size",   args.batch_size,
+                "--lr",           args.lr,
+                "--seed",         args.seed,
+            ]))
             print("running:", " ".join(cmd))
             # run without capture so you see everything
             result = subprocess.run(cmd, cwd=os.getcwd())

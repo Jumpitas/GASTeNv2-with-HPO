@@ -67,14 +67,17 @@ config_schema = Schema({
                 "d_num_blocks": int,
             }
         ),
-        "loss": Or({
-            "name": "wgan-gp",
-            "args": {
-                "lambda": int,
+        "loss": Or(
+            {
+                "name": "wgan-gp",
+                "args": { "lambda": float },
+            },
+            { "name": "ns"                        },
+            {
+                "name": "hinge-r1",
+                "args": { "lambda": float }
             }
-        }, {
-            "name": "ns"
-        })
+        )
     },
     "optimizer": {
         "lr": float,
@@ -123,6 +126,12 @@ def read_config(path):
         config['train']['step-2']['classifier'] = [
             os.environ['FILESDIR'] + '/' + rel_path for rel_path in config['train']['step-2']['classifier']]
         os.makedirs(config['out-dir'], exist_ok=True)
+        os.makedirs(config['out-dir'], exist_ok=True)
+        os.makedirs(config['data-dir'], exist_ok=True)
+        # if fid-stats-path is a file, ensure its parent dir exists
+        os.makedirs(os.path.dirname(config['fid-stats-path']), exist_ok=True)
+        # similarly for test-noise if it’s a file
+        os.makedirs(os.path.dirname(config['test-noise']), exist_ok=True)
     try:
         config_schema.validate(config)
     except SchemaError as se:
