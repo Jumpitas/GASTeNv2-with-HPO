@@ -123,7 +123,7 @@ def train(C, opt, crit, train_loader, val_loader, test_loader, acc_fun, args, na
             stats['best_epoch'] = epoch
             stats['early_stop_tracker'] = 0
 
-            cp_path = checkpoint(C, name, model_params, stats, args, output_dir=out_dir)
+            cp_path = checkpoint(C, name, model_params, stats, args, output_dir=args.out_dir)
             print("")
             print(' > Saved checkpoint to {}'.format(cp_path))
         else:
@@ -211,7 +211,7 @@ def main():
     stats['test_loss'] = test_loss
     print('Test acc. =', test_acc)
     print('test loss. =', test_loss)
-    cp_path = checkpoint(best_C, name, model_params, stats, args, output_dir=out_dir)
+    cp_path = checkpoint(best_C, name, model_params, stats, args, output_dir=args.out_dir)
 
     train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
     train_y_hat = torch.zeros_like(dataset.targets, dtype=float)
