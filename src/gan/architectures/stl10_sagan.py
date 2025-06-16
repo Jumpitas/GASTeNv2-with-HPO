@@ -53,22 +53,22 @@ class ResBlockDown(nn.Module):
         return self.act(x + skip)
 
 class Generator(nn.Module):
-    def __init__(self, z_dim=128, base_ch=512, img_ch=3):
+    def __init__(self, z_dim=128, base_ch=128, img_ch=3):
         super().__init__()
         self.z_dim   = z_dim
         self.base_ch = base_ch
         self.img_ch  = img_ch
 
-        # ───❶ Output features for a 6×6 map instead of 4×4:
+        # Fully-connected → 6×6 feature map
         self.fc = spectral_norm(nn.Linear(z_dim, base_ch * 6 * 6))
 
-        # Four up‐sampling blocks: 6→12→24→48→96
+        # Upsampling blocks
         self.net = nn.Sequential(
             ResBlockUp(base_ch,       base_ch//2),   #  6×6 →  12×12
-            SelfAttention(base_ch//2),
+            #SelfAttention(base_ch//2),               # removed to save memory
             ResBlockUp(base_ch//2,    base_ch//4),   # 12×12 →  24×24
             ResBlockUp(base_ch//4,    base_ch//8),   # 24×24 →  48×48
-            SelfAttention(base_ch // 8),
+            SelfAttention(base_ch//8),                 # keep one attention at 48×48
             ResBlockUp(base_ch//8,    base_ch//16),  # 48×48 →  96×96
             nn.BatchNorm2d(base_ch//16),
             nn.ReLU(inplace=False),
@@ -76,14 +76,13 @@ class Generator(nn.Module):
             nn.Tanh()
         )
 
-
     def forward(self, z):
-        # ───❷ Reshape into (batch, base_ch, 6, 6)
+        # z → (batch, base_ch, 6, 6)
         x = self.fc(z).view(z.size(0), self.base_ch, 6, 6)
         return self.net(x)
 
 class Discriminator(nn.Module):
-    def __init__(self, base_ch=64, img_ch=3):
+    def __init__(self, base_ch=32, img_ch=3):
         super().__init__()
         self.base_ch = base_ch
         self.img_ch  = img_ch
@@ -92,12 +91,12 @@ class Discriminator(nn.Module):
             spectral_norm(nn.Conv2d(img_ch, base_ch, 3, 1, 1)),   # 96×96 → 96×96
             nn.LeakyReLU(0.2, inplace=False),
             ResBlockDown(base_ch,       base_ch*2),   # 96×96 → 48×48
-            SelfAttention(base_ch*2),
+            #SelfAttention(base_ch*2),               # commented out to reduce memory
             ResBlockDown(base_ch*2,     base_ch*4),   # 48×48 → 24×24
             ResBlockDown(base_ch*4,     base_ch*8),   # 24×24 → 12×12
             ResBlockDown(base_ch*8,     base_ch*16),  # 12×12 →  6×6
             nn.LeakyReLU(0.2, inplace=False),
-            # Final conv: 6×6 → 3×3 (kernel=4, stride=2, padding=1)
+            # Final conv
             spectral_norm(nn.Conv2d(base_ch*16, base_ch*16, 4, 2, 1)),  # 6×6 → 3×3
             nn.LeakyReLU(0.2, inplace=False),
         )
