@@ -91,7 +91,7 @@ def get_chest_xray(dataroot, train=True):
 
 def get_imagenet(dataroot, train=True):
     split = "train" if train else "validation"
-    # stream-only so you don’t download all 150 GB
+    # stream-only
     hf_ds = hf_load_dataset(
         "imagenet-1k",
         split=split,
@@ -101,7 +101,7 @@ def get_imagenet(dataroot, train=True):
     )
 
     # only keep the two labels you care about
-    TARGETS = {281, 282}
+    TARGETS = {207, 208}
     transform = transforms.Compose([
         transforms.Lambda(lambda img: img.convert("RGB")),
         transforms.Resize((224, 224)),

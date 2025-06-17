@@ -3,13 +3,16 @@ import glob
 import json
 import argparse
 import numpy as np
-from dotenv import load_dotenv
 import pandas as pd
+from dotenv import load_dotenv
 
 import torch
 import wandb
 
-from src.metrics.fid.fid_score import load_statistics_from_path, calculate_activation_statistics_dataloader
+from src.metrics.fid.fid_score import (
+    load_statistics_from_path,
+    calculate_activation_statistics_dataloader,
+)
 from src.metrics.fid.inception import get_inception_feature_map_fn
 from src.metrics.fid import FID
 
@@ -17,9 +20,8 @@ from src.metrics import LossSecondTerm, Hubris
 from src.data_loaders import load_dataset
 from src.gan.train import train
 from src.gan.update_g import (
-    UpdateGeneratorGAN,
     UpdateGeneratorGASTEN_gaussian,
-    UpdateGeneratorGASTEN_gaussianV2
+    UpdateGeneratorGASTEN_gaussianV2,
 )
 from src.metrics.c_output_hist import OutputsHistogram
 from src.utils import (
@@ -28,120 +30,107 @@ from src.utils import (
     setup_reprod,
     create_checkpoint_path,
     gen_seed,
-    seed_worker
+    seed_worker,
 )
 from src.utils.plot import plot_metrics
 from src.utils.config import read_config
 from src.utils.checkpoint import (
     construct_gan_from_checkpoint,
-    construct_classifier_from_checkpoint
+    construct_classifier_from_checkpoint,
 )
-from src.gan import construct_gan, construct_loss
+from src.gan import construct_loss  # ← STEP 1: bring in construct_loss
 
-# SMAC imports for Bayesian
 from ConfigSpace import Configuration, ConfigurationSpace, Float
 from smac import HyperparameterOptimizationFacade, Scenario
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", dest="config_path",
-                        required=True, help="Path to config file")
+    parser.add_argument("--config", dest="config_path", required=True,
+                        help="Path to YAML config")
     parser.add_argument("--no-plots", action="store_true",
-                        help="Disable creation of images for plots")
+                        help="Skip final plotting")
     return parser.parse_args()
 
-def construct_optimizers(config, G, D):
-    g_optim = torch.optim.Adam(
-        G.parameters(),
-        lr=config["lr"],
-        betas=(config["beta1"], config["beta2"])
-    )
-    d_optim = torch.optim.Adam(
-        D.parameters(),
-        lr=config["lr"],
-        betas=(config["beta1"], config["beta2"])
-    )
+def construct_optimizers(opt_cfg, G, D):
+    g_optim = torch.optim.Adam(G.parameters(),
+                               lr=opt_cfg["lr"],
+                               betas=(opt_cfg["beta1"], opt_cfg["beta2"]))
+    d_optim = torch.optim.Adam(D.parameters(),
+                               lr=opt_cfg["lr"],
+                               betas=(opt_cfg["beta1"], opt_cfg["beta2"]))
     return g_optim, d_optim
 
-def train_modified_gan(config, dataset, cp_dir, gan_path, test_noise,
-                       fid_metrics, c_out_hist,
-                       C, C_name, C_params, C_stats, C_args,
-                       weight, fixed_noise, num_classes, device, seed, run_id):
-    print(f"Running experiment with classifier {C_name} and weight {weight} ...")
-
-    if not (isinstance(weight, dict) and ("gaussian" in weight or "gaussian-v2" in weight)):
-        raise ValueError("For GASTeN v2 we require a dict with 'gaussian' or 'gaussian-v2'.")
-
+def train_modified_gan(
+    config, dataset, cp_dir, gan_ckpt, test_noise,
+    fid_metrics, c_out_hist,
+    C, C_name, C_params, C_stats, C_args,
+    weight, fixed_noise, num_classes, device, seed, run_id
+):
+    # unpack gaussian vs gaussian-v2
     if "gaussian" in weight:
-        weight_txt = 'gauss_' + '_'.join(f'{k}_{v}' for k, v in weight['gaussian'].items())
         a, v = weight["gaussian"]["alpha"], weight["gaussian"]["var"]
-        g_updater = UpdateGeneratorGASTEN_gaussian
+        updater_cls = UpdateGeneratorGASTEN_gaussian
+        tag = f"gauss_α{a:.3f}_σ{v:.4f}"
     else:
-        weight_txt = 'gauss_v2_' + '_'.join(f'{k}_{v}' for k, v in weight['gaussian-v2'].items())
         a, v = weight["gaussian-v2"]["alpha"], weight["gaussian-v2"]["var"]
-        g_updater = UpdateGeneratorGASTEN_gaussianV2
+        updater_cls = UpdateGeneratorGASTEN_gaussianV2
+        tag = f"gaussV2_α{a:.3f}_σ{v:.4f}"
 
-    run_name   = f"{C_name}_{weight_txt}"
-    gan_cp_dir = os.path.join(cp_dir, run_name)
+    run_name = f"{C_name}_{tag}"
+    out_dir  = os.path.join(cp_dir, run_name)
+    os.makedirs(out_dir, exist_ok=True)  # ensures directory exists
 
-    batch_size       = config['train']['step-2']['batch-size']
-    n_epochs         = config['train']['step-2']['epochs']
-    n_disc_iters     = config['train']['step-2']['disc-iters']
-    checkpoint_every = config['train']['step-2']['checkpoint-every']
-
-    G, D, _, _    = construct_gan_from_checkpoint(gan_path, device=device)
+    # load pretrained GAN from step‑1
+    G, D, _, _ = construct_gan_from_checkpoint(gan_ckpt, device=device)
     g_crit, d_crit = construct_loss(config["model"]["loss"], D)
-    g_opt, d_opt   = construct_optimizers(config["optimizer"], G, D)
+    g_opt, d_opt  = construct_optimizers(config["optimizer"], G, D)
+    g_updater     = updater_cls(g_crit, C, alpha=a, var=v)
 
-    g_updater = g_updater(g_crit, C, alpha=a, var=v)
+    # training hyperparams
+    tcfg = config["train"]["step-2"]
+    bs, nepochs = tcfg["batch-size"], tcfg["epochs"]
+    nd, chk_every = tcfg["disc-iters"], tcfg["checkpoint-every"]
+    early_crit = tcfg.get("early-stop", {}).get("criteria", None)
+    early_stop = ("conf_dist", early_crit) if early_crit is not None else ("conf_dist", None)
 
-    early_stop_key = 'conf_dist'
-    crit           = config['train']['step-2'].get('early-stop', {}).get('criteria', None)
-    early_stop     = (early_stop_key, crit) if crit is not None else (early_stop_key, None)
-
+    # reproducibility
     set_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark     = False
+
+    # wandb logging
     wandb.init(
         project=config["project"],
         group=config["name"],
-        entity=os.environ['ENTITY'],
-        job_type='step-2',
-        name=f'{run_id}-{run_name}',
+        entity=os.environ["ENTITY"],
+        job_type="step-2",
+        name=f"{run_id}-{run_name}",
         config={
-            'id': run_id,
-            'seed': seed,
-            'weight': weight_txt,
-            'train': config["train"]["step-2"],
-            'classifier': C_name,
-            'classifier_loss': C_stats.get('test_loss', 0.0),
-        }
+            "seed": seed,
+            "weight": weight,
+            "train": tcfg,
+            "classifier": C_name,
+            "classifier_loss": C_stats.get("test_loss", 0.0),
+        },
     )
 
-    _, _, _, eval_metrics = train(
-        config, dataset, device, n_epochs, batch_size,
+    # actual train loop
+    _, _, _, metrics = train(
+        config, dataset, device, nepochs, bs,
         G, g_opt, g_updater,
         D, d_opt, d_crit,
         test_noise, fid_metrics,
-        n_disc_iters,
+        nd,
         early_stop=early_stop,
-        checkpoint_dir=gan_cp_dir,
+        checkpoint_dir=out_dir,
         fixed_noise=fixed_noise,
         c_out_hist=c_out_hist,
-        checkpoint_every=checkpoint_every,
+        checkpoint_every=chk_every,
         classifier=C
     )
 
     wandb.finish()
-    return eval_metrics
-
-def compute_dataset_fid_stats(dset, fn, dims, batch_size=64, device='cpu', num_workers=0):
-    loader = torch.utils.data.DataLoader(
-        dset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        worker_init_fn=seed_worker
-    )
-    return calculate_activation_statistics_dataloader(loader, fn, dims=dims, device=device)
+    return metrics
 
 def main():
     load_dotenv()
@@ -149,113 +138,135 @@ def main():
     config = read_config(args.config_path)
     print("Loaded config:", args.config_path)
 
-    ds_cfg      = config["dataset"]
-    dataset_name = ds_cfg["name"]
-    pos_class   = ds_cfg["binary"]["pos"]
-    neg_class   = ds_cfg["binary"]["neg"]
-
-    # Step‑1 best config
-    pattern = f"results/step-1-best-config-{dataset_name}-{pos_class}v{neg_class}.txt"
-    files   = glob.glob(pattern)
+    # find step‑1 best GAN checkpoint
+    ds = config["dataset"]
+    patt = f"results/step-1-best-config-{ds['name']}-{ds['binary']['pos']}v{ds['binary']['neg']}.txt"
+    files = glob.glob(patt)
     if not files:
-        raise FileNotFoundError("No step‑1 best‑config file matching " + pattern)
-    gan_checkpoint_dir = open(files[0]).read().strip()
-    config['train']['step-1'] = gan_checkpoint_dir
-    print("Using GAN checkpoint:", gan_checkpoint_dir)
+        raise FileNotFoundError(f"No step‑1 config matching {patt}")
+    gan_ckpt = open(files[0]).read().strip()
+    print("Using step‑1 GAN checkpoint:", gan_ckpt)
 
-    # seeds
-    step_2_seeds = config.get("step-2-seeds", [gen_seed() for _ in range(config["num-runs"])])
-
+    # data + device
     device = torch.device(config["device"])
-    pos, neg = config["dataset"]["binary"]["pos"], config["dataset"]["binary"]["neg"]
     dataset, num_classes, img_size = load_dataset(
-        config["dataset"]["name"], config["data-dir"], pos, neg
-    )
-    print("Dataset:", config["dataset"]["name"], f"{pos}v{neg}")
-
-    fixed_noise = (
-        torch.Tensor(np.load(config['fixed-noise']))[...,].to(device)
-        if isinstance(config['fixed-noise'], str)
-        else torch.randn(config['fixed-noise'], config["model"]["z_dim"], device=device)
-    )
-    test_noise, _ = load_z(config['test-noise'])
-
-    mu, sigma   = load_statistics_from_path(config['fid-stats-path'])
-    fm_fn, dims = get_inception_feature_map_fn(device)
-    original_fid = FID(
-        feature_map_fn=fm_fn,
-        dims=dims,
-        n_images=test_noise.size(0),
-        mu_real=mu,
-        sigma_real=sigma,
-        device=device
+        ds["name"], config["data-dir"], ds["binary"]["pos"], ds["binary"]["neg"]
     )
 
-    # load classifier
-    clf_path = config['train']['step-2']['classifier'][0]
-    C, C_params, C_stats, C_args = construct_classifier_from_checkpoint(
-        clf_path, device=device
-    )
+    # fixed & test noise
+    if isinstance(config["fixed-noise"], str):
+        fixed_noise = torch.Tensor(np.load(config["fixed-noise"])).to(device)
+    else:
+        fixed_noise = torch.randn(config["fixed-noise"], config["model"]["z_dim"], device=device)
+    test_noise, _ = load_z(config["test-noise"])
+
+    # FID setup
+    mu, sigma      = load_statistics_from_path(config["fid-stats-path"])
+    fm_fn, dims    = get_inception_feature_map_fn(device)
+    original_fid   = FID(fm_fn, dims, test_noise.size(0), mu, sigma, device=device)
+
+    # classifier
+    clf_path = config["train"]["step-2"]["classifier"][0]
+    C, C_p, C_s, C_a = construct_classifier_from_checkpoint(clf_path, device=device)
     C.eval()
 
-    # prepare metrics and hist
+    # metrics dictionary
     fid_metrics = {
-        'fid':       original_fid,
-        'conf_dist': LossSecondTerm(C),
-        'hubris':    Hubris(C, test_noise.size(0))
+        "fid":       original_fid,
+        "conf_dist": LossSecondTerm(C),
+        "hubris":    Hubris(C, test_noise.size(0)),
     }
     c_out_hist = None if args.no_plots else OutputsHistogram(C, test_noise.size(0))
 
-    # cp_dir & gan_path
+    # experiment folder
     run_id = wandb.util.generate_id()
     cp_dir = create_checkpoint_path(config, run_id)
-    gan_path = gan_checkpoint_dir
 
-    # objective for SMAC
+    # composite weights (you can tweak these)
+    w_fid, w_cd = 1.0, 0.001
+
+    # HPO objective: composite of FID + tiny weight × conf_dist
     def step2_obj(cfg: Configuration, seed: int) -> float:
-        weight = {"gaussian": {"alpha": cfg["alpha"], "var": cfg["var"]}}
-        em = train_modified_gan(
-            config, dataset, cp_dir, gan_path, test_noise,
+        metrics = train_modified_gan(
+            config, dataset, cp_dir, gan_ckpt, test_noise,
             fid_metrics, c_out_hist,
-            C, os.path.basename(clf_path), C_params, C_stats, C_args,
-            weight, fixed_noise, num_classes, device, seed,
+            C, os.path.basename(clf_path), C_p, C_s, C_a,
+            {"gaussian": {"alpha": cfg["alpha"], "var": cfg["var"]}},
+            fixed_noise, num_classes, device, seed,
             wandb.util.generate_id()
         )
-        return min(em.stats['fid'])
+        # guard empty
+        if not metrics.stats["fid"] or not metrics.stats["conf_dist"]:
+            return float("inf")
+        fid_val = metrics.stats["fid"][-1]
+        cd_val  = metrics.stats["conf_dist"][-1]
+        return w_fid * fid_val + w_cd * cd_val
 
-    # Bayesian over alpha∈[0,5], var∈[1e-4,1]
+    # SMAC setup
     cs       = ConfigurationSpace()
     cs.add_hyperparameters([
         Float("alpha", (0.0, 5.0), default=1.0),
         Float("var",   (1e-4, 1.0), default=0.01),
     ])
-    scenario = Scenario(cs, deterministic=True, n_trials=50, walltime_limit=72000)
-    smac     = HyperparameterOptimizationFacade(scenario, step2_obj, overwrite=True)
+    scenario = Scenario(
+        cs,
+        deterministic=True,
+        n_trials=config["train"]["step-2"].get("hpo-trials", 50),
+        walltime_limit=config["train"]["step-2"].get("hpo-walltime", 36000),
+    )
+    smac = HyperparameterOptimizationFacade(scenario, step2_obj, overwrite=True)
+
+    print("Starting SMAC HPO step‑2 …")
     incumbent = smac.optimize()
-    best     = incumbent.get_dictionary()
+    best_cfg   = incumbent.get_dictionary()
 
-    out_json = f"results/step-2-best-gauss-{pos}v{neg}.json"
+    # save JSON of best hyperparams
+    out_json = os.path.join(
+        cp_dir,
+        f"step-2-best-gauss-{ds['binary']['pos']}v{ds['binary']['neg']}.json"
+    )
     with open(out_json, "w") as f:
-        json.dump(best, f, indent=2)
-    print("Saved step‑2 best Gaussian params →", out_json)
+        json.dump(best_cfg, f, indent=2)
+    print("→ Saved best hyperparams to", out_json)
 
-    # (optional) final run with best values for plots
+    # final evaluation + summary TXT
+    final_metrics = train_modified_gan(
+        config, dataset, cp_dir, gan_ckpt, test_noise,
+        fid_metrics, c_out_hist,
+        C, os.path.basename(clf_path), C_p, C_s, C_a,
+        {"gaussian": best_cfg},
+        fixed_noise, num_classes, device,
+        gen_seed(), wandb.util.generate_id()
+    )
+
+    fid_list = final_metrics.stats["fid"]
+    best_epoch = int(np.argmin(fid_list)) + 1
+
+    last_fid = final_metrics.stats["fid"][-1]
+    last_cd  = final_metrics.stats["conf_dist"][-1]
+
+    summary_txt = os.path.join(
+        cp_dir,
+        f"step-2-best-gauss-{ds['binary']['pos']}v{ds['binary']['neg']}-summary.txt"
+    )
+    with open(summary_txt, "w") as f:
+        f.write("Best Gaussian parameters:\n")
+        f.write(json.dumps(best_cfg, indent=2) + "\n\n")
+        f.write("Performance metrics:\n")
+        f.write(f"  FID       = {last_fid:.4f}\n")
+        f.write(f"  Conf_dist = {last_cd:.4f}\n")
+        f.write(f"  Best    Epoch      = {best_epoch}\n")
+    print("→ Saved summary to", summary_txt)
+
+    # optional plots
     if not args.no_plots:
-        weight = {"gaussian": best}
-        em = train_modified_gan(
-            config, dataset, cp_dir, gan_path, test_noise,
-            fid_metrics, c_out_hist,
-            C, os.path.basename(clf_path), C_params, C_stats, C_args,
-            weight, fixed_noise, num_classes, device, gen_seed(),
-            wandb.util.generate_id()
-        )
         df = pd.DataFrame({
-            'fid':       em.stats['fid'],
-            'conf_dist': em.stats['conf_dist'],
-            'hubris':    em.stats['hubris'],
-            'epoch':     list(range(1, len(em.stats['fid'])+1))
+            "fid":       final_metrics.stats["fid"],
+            "conf_dist": final_metrics.stats["conf_dist"],
+            "hubris":    final_metrics.stats["hubris"],
+            "epoch":     list(range(1, len(final_metrics.stats["fid"]) + 1)),
         })
-        plot_metrics(df, cp_dir, f"final-{pos}v{neg}")
+        plot_metrics(df, cp_dir, f"final-{ds['binary']['pos']}v{ds['binary']['neg']}")
 
 if __name__ == "__main__":
     main()

@@ -54,7 +54,7 @@ class OutputsHistogram(Metric):
         self._var_safe_plot(cd, axs[1],
                             "Confusion Distance Distribution", bins=20, xlim=(0, .5))
 
-        hubris_val = self.hubris.finalize().item()
+        hubris_val = float(self.hubris.finalize())
         axs[2].bar(['Hubris'], [hubris_val]); axs[2].set_ylim(0, 1)
 
         fig.canvas.draw()
