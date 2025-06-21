@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,11 +9,12 @@ import numpy as np
 def weights_init(m):
     classname = m.__class__.__name__
     if classname.find('Conv') != -1:
-        nn.init.normal_(m.weight.data, 0.0, 0.02)
-        if getattr(m, 'bias', None) is not None:
-            nn.init.constant_(m.bias, 0)
+        try:
+            nn.init.kaiming_normal_(m.weight, a=0.2, nonlinearity='leaky_relu')
+        except Exception:
+            pass
     elif classname.find('BatchNorm') != -1:
-        nn.init.normal_(m.weight.data, 1.0, 0.02)
+        nn.init.normal_(m.weight, 1.0, 0.02)
         nn.init.constant_(m.bias, 0)
 
 
@@ -21,113 +23,129 @@ def conv_out_size_same(size, stride):
 
 
 def compute_padding_same(in_size, out_size, kernel, stride):
-    # 2 * padding - out_padding = (in_size-1)*stride - out_size + kernel
     res = (in_size - 1) * stride - out_size + kernel
-    out_padding = 0 if (res % 2 == 0) else 1
-    padding = (res + out_padding) / 2
-    return int(padding), int(out_padding)
+    out_pad = 1 if (res % 2) else 0
+    pad = (res + out_pad) // 2
+    return pad, out_pad
 
 
-class ConvTranspose2dSame(nn.Module):
-    def __init__(self, in_ch, out_ch, in_size, out_size, kernel, stride, bias=True):
+class UpBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel=3, stride=1, padding=1):
         super().__init__()
-        in_h, in_w = in_size
-        out_h, out_w = out_size
-        pad_h, out_pad_h = compute_padding_same(in_h, out_h, kernel, stride)
-        pad_w, out_pad_w = compute_padding_same(in_w, out_w, kernel, stride)
-        self.conv_t = nn.ConvTranspose2d(in_ch, out_ch, kernel, stride,
-                                         (pad_h, pad_w), (out_pad_h, out_pad_w), bias=bias)
+        self.block = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Conv2d(in_ch, out_ch, kernel, stride, padding, bias=False),
+            nn.InstanceNorm2d(out_ch, affine=True),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
 
     def forward(self, x):
-        return self.conv_t(x)
+        return self.block(x)
 
 
-class SelfAttention(nn.Module):
-    def __init__(self, channels):
+class DownBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel=4, stride=2, padding=1, use_sn=True, use_batch_norm=True, **kwargs):
         super().__init__()
-        self.f = spectral_norm(nn.Conv2d(channels, channels//8, 1))
-        self.g = spectral_norm(nn.Conv2d(channels, channels//8, 1))
-        self.h = spectral_norm(nn.Conv2d(channels, channels//2, 1))
-        self.v = spectral_norm(nn.Conv2d(channels//2, channels, 1))
-        self.gamma = nn.Parameter(torch.zeros(1))
+        conv = nn.Conv2d(in_ch, out_ch, kernel, stride, padding, bias=False)
+        if use_sn:
+            conv = spectral_norm(conv)
+        layers = [conv]
+        if use_batch_norm:
+            layers.append(nn.BatchNorm2d(out_ch))
+        layers.append(nn.LeakyReLU(0.2, inplace=True))
+        self.block = nn.Sequential(*layers)
 
     def forward(self, x):
-        b,c,h,w = x.size()
-        f = self.f(x).view(b, -1, h*w)
-        g = self.g(x).view(b, -1, h*w)
-        beta = F.softmax(torch.bmm(f.permute(0,2,1), g), dim=-1)
-        h_ = self.h(x).view(b, -1, h*w)
-        o = torch.bmm(h_, beta).view(b, c//2, h, w)
-        o = self.v(o)
-        return x + self.gamma * o
+        return self.block(x)
 
 
 class Generator(nn.Module):
-    def __init__(self, image_size=(1,128,128), z_dim=100, n_blocks=4, base_ch=64):
+    def __init__(self, image_size, z_dim=100, filter_dim=64, n_blocks=3, **kwargs):
+        """
+        image_size:   (C, H, W)
+        z_dim:        latent dimension
+        filter_dim:   base channel count
+        n_blocks:     desired upsampling stages
+        """
         super().__init__()
-        C,H,W = image_size
-        init_spatial = H // (2**n_blocks)
-        dims = [base_ch * (2**i) for i in range(n_blocks+1)]
-        gen_dims = list(reversed(dims))
-        # project z → feature map
+        C, H, W = image_size
+
+        # Dynamically clamp n_blocks so initial feature map >=4x4
+        max_blocks = max(int(math.log2(min(H, W))) - 2, 1)
+        self.n_blocks = min(n_blocks, max_blocks)
+        self.filter_dim = filter_dim
+        self.z_dim = z_dim
+
+        # Compute initial dims
+        self.init_h = H // (2 ** self.n_blocks)
+        self.init_w = W // (2 ** self.n_blocks)
+        self.init_ch = filter_dim * (2 ** self.n_blocks)
+
+        # Project latent to feature map
         self.project = nn.Sequential(
-            nn.ConvTranspose2d(z_dim, gen_dims[0], init_spatial, 1, 0, bias=False),
-            nn.BatchNorm2d(gen_dims[0]),
-            nn.ReLU(True),
+            nn.Linear(z_dim, self.init_ch * self.init_h * self.init_w, bias=False),
+            nn.BatchNorm1d(self.init_ch * self.init_h * self.init_w),
+            nn.ReLU(True)
         )
-        # upsampling blocks
+
+        # Build upsample blocks
         blocks = []
-        curr = init_spatial
-        for i in range(n_blocks):
-            in_c, out_c = gen_dims[i], gen_dims[i+1]
-            seq = [nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)]
-            if curr == 32:
-                seq.append(SelfAttention(in_c))
-            seq += [
-                nn.BatchNorm2d(in_c),
-                nn.ReLU(True),
-                nn.Conv2d(in_c, out_c, 3, 1, 1, bias=False),
-            ]
-            blocks.append(nn.Sequential(*seq))
-            curr *= 2
-        self.blocks = nn.Sequential(*blocks)
-        self.to_gray = nn.Sequential(nn.Conv2d(gen_dims[-1], 1, 3,1,1), nn.Tanh())
+        for i in range(self.n_blocks):
+            in_ch = filter_dim * (2 ** (self.n_blocks - i))
+            out_ch = filter_dim * (2 ** (self.n_blocks - i - 1))
+            blocks.append(UpBlock(in_ch, out_ch))
+        self.up_blocks = nn.Sequential(*blocks)
+
+        # Final conv to image
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(filter_dim, C, kernel_size=3, stride=1, padding=1),
+            nn.Tanh()
+        )
+
         self.apply(weights_init)
 
     def forward(self, z):
-        x = z.view(-1, z.size(1), 1, 1)
-        x = self.project(x)
-        x = self.blocks(x)
-        return self.to_gray(x)
+        x = self.project(z)
+        x = x.view(-1, self.init_ch, self.init_h, self.init_w)
+        x = self.up_blocks(x)
+        return self.final_conv(x)
 
 
 class Discriminator(nn.Module):
-    def __init__(self, image_size=(1,128,128), base_ch=64, use_bn=False, is_critic=True):
+    def __init__(self, image_size, filter_dim=64, n_blocks=3, use_sn=True, use_batch_norm=True, is_critic=False, **kwargs):
+        """
+        image_size:      (C, H, W)
+        filter_dim:      base channel count
+        n_blocks:        desired downsampling stages
+        """
         super().__init__()
-        C,H,W = image_size
-        n_blocks = 4
-        dims = [base_ch * (2**i) for i in range(n_blocks+1)]
-        blocks = []
-        curr = H
-        in_c = 1
-        for i, out_c in enumerate(dims):
-            seq = [spectral_norm(nn.Conv2d(in_c, out_c, 4,2,1, bias=(i==0)))]
-            if use_bn and i>0:
-                seq.append(nn.BatchNorm2d(out_c))
-            seq.append(nn.LeakyReLU(0.2, inplace=True))
-            if curr == 32:
-                seq.append(SelfAttention(out_c))
-            blocks.append(nn.Sequential(*seq))
-            in_c = out_c
-            curr //= 2
-        self.blocks = nn.Sequential(*blocks)
-        self.final = spectral_norm(nn.Conv2d(dims[-1], 1, (curr, curr), 1, 0, bias=False))
-        self.flatten = nn.Flatten()
+        C, H, W = image_size
+
+        # Clamp n_blocks similarly
+        max_blocks = max(int(math.log2(min(H, W))) - 2, 1)
+        self.n_blocks = min(n_blocks, max_blocks)
+        layers = []
+        in_ch = C
+        for i in range(self.n_blocks):
+            out_ch = filter_dim * (2 ** i)
+            layers.append(
+                DownBlock(in_ch, out_ch, use_sn=use_sn, use_batch_norm=use_batch_norm)
+            )
+            in_ch = out_ch
+        self.features = nn.Sequential(*layers)
+
+        # Final conv
+        conv_final = nn.Conv2d(in_ch, 1, kernel_size=4, stride=1, padding=0, bias=False)
+        if use_sn:
+            conv_final = spectral_norm(conv_final)
+        classifier = [conv_final]
+        if not is_critic:
+            classifier.append(nn.Sigmoid())
+        self.classifier = nn.Sequential(*classifier)
+
         self.apply(weights_init)
 
     def forward(self, x):
-        h = x
-        for b in self.blocks:
-            h = b(h)
-        h = self.final(h)
-        return self.flatten(h).view(-1)
+        feat = self.features(x)
+        out = self.classifier(feat)
+        return out.view(-1)

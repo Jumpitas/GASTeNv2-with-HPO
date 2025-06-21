@@ -8,14 +8,11 @@ from dotenv import load_dotenv
 
 import torch
 import wandb
+from torchvision.utils import save_image
 
-from src.metrics.fid.fid_score import (
-    load_statistics_from_path,
-    calculate_activation_statistics_dataloader,
-)
+from src.metrics.fid.fid_score import load_statistics_from_path
 from src.metrics.fid.inception import get_inception_feature_map_fn
 from src.metrics.fid import FID
-
 from src.metrics import LossSecondTerm, Hubris
 from src.data_loaders import load_dataset
 from src.gan.train import train
@@ -27,29 +24,24 @@ from src.metrics.c_output_hist import OutputsHistogram
 from src.utils import (
     load_z,
     set_seed,
-    setup_reprod,
-    create_checkpoint_path,
     gen_seed,
-    seed_worker,
+    create_checkpoint_path,
 )
-from src.utils.plot import plot_metrics
 from src.utils.config import read_config
 from src.utils.checkpoint import (
     construct_gan_from_checkpoint,
     construct_classifier_from_checkpoint,
 )
-from src.gan import construct_loss  # ← STEP 1: bring in construct_loss
+from src.gan import construct_loss
 
-from ConfigSpace import Configuration, ConfigurationSpace, Float
 from smac import HyperparameterOptimizationFacade, Scenario
+from ConfigSpace import ConfigurationSpace, Float
 
 def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", dest="config_path", required=True,
-                        help="Path to YAML config")
-    parser.add_argument("--no-plots", action="store_true",
-                        help="Skip final plotting")
-    return parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", required=True, help="Path to YAML config")
+    p.add_argument("--no-plots", action="store_true", help="Skip final plotting")
+    return p.parse_args()
 
 def construct_optimizers(opt_cfg, G, D):
     g_optim = torch.optim.Adam(G.parameters(),
@@ -78,9 +70,9 @@ def train_modified_gan(
 
     run_name = f"{C_name}_{tag}"
     out_dir  = os.path.join(cp_dir, run_name)
-    os.makedirs(out_dir, exist_ok=True)  # ensures directory exists
+    os.makedirs(out_dir, exist_ok=True)
 
-    # load pretrained GAN from step‑1
+    # load pretrained GAN from step-1
     G, D, _, _ = construct_gan_from_checkpoint(gan_ckpt, device=device)
     g_crit, d_crit = construct_loss(config["model"]["loss"], D)
     g_opt, d_opt  = construct_optimizers(config["optimizer"], G, D)
@@ -135,42 +127,40 @@ def train_modified_gan(
 def main():
     load_dotenv()
     args   = parse_args()
-    config = read_config(args.config_path)
-    print("Loaded config:", args.config_path)
+    config = read_config(args.config)
 
-    # find step‑1 best GAN checkpoint
+    # 1) find step-1 best GAN checkpoint
     ds = config["dataset"]
-    patt = f"results/step-1-best-config-{ds['name']}-{ds['binary']['pos']}v{ds['binary']['neg']}.txt"
+    patt = (f"results/step-1-best-config-"
+            f"{ds['name']}-{ds['binary']['pos']}v{ds['binary']['neg']}.txt")
     files = glob.glob(patt)
-    if not files:
-        raise FileNotFoundError(f"No step‑1 config matching {patt}")
+    assert files, f"No step-1 config for {patt}"
     gan_ckpt = open(files[0]).read().strip()
-    print("Using step‑1 GAN checkpoint:", gan_ckpt)
 
-    # data + device
+    # 2) prepare data, classifier & FID
     device = torch.device(config["device"])
-    dataset, num_classes, img_size = load_dataset(
-        ds["name"], config["data-dir"], ds["binary"]["pos"], ds["binary"]["neg"]
+    dataset, num_classes, _ = load_dataset(
+        ds["name"], config["data-dir"],
+        ds["binary"]["pos"], ds["binary"]["neg"]
     )
-
-    # fixed & test noise
     if isinstance(config["fixed-noise"], str):
         fixed_noise = torch.Tensor(np.load(config["fixed-noise"])).to(device)
     else:
-        fixed_noise = torch.randn(config["fixed-noise"], config["model"]["z_dim"], device=device)
+        fixed_noise = torch.randn(
+            config["fixed-noise"],
+            config["model"]["z_dim"],
+            device=device
+        )
     test_noise, _ = load_z(config["test-noise"])
 
-    # FID setup
-    mu, sigma      = load_statistics_from_path(config["fid-stats-path"])
-    fm_fn, dims    = get_inception_feature_map_fn(device)
-    original_fid   = FID(fm_fn, dims, test_noise.size(0), mu, sigma, device=device)
+    mu, sigma    = load_statistics_from_path(config["fid-stats-path"])
+    fm_fn, dims  = get_inception_feature_map_fn(device)
+    original_fid = FID(fm_fn, dims, test_noise.size(0), mu, sigma, device=device)
 
-    # classifier
     clf_path = config["train"]["step-2"]["classifier"][0]
     C, C_p, C_s, C_a = construct_classifier_from_checkpoint(clf_path, device=device)
     C.eval()
 
-    # metrics dictionary
     fid_metrics = {
         "fid":       original_fid,
         "conf_dist": LossSecondTerm(C),
@@ -178,15 +168,12 @@ def main():
     }
     c_out_hist = None if args.no_plots else OutputsHistogram(C, test_noise.size(0))
 
-    # experiment folder
+    # where all step-2 outputs go
     run_id = wandb.util.generate_id()
     cp_dir = create_checkpoint_path(config, run_id)
 
-    # composite weights (you can tweak these)
-    w_fid, w_cd = 1.0, 0.001
-
-    # HPO objective: composite of FID + tiny weight × conf_dist
-    def step2_obj(cfg: Configuration, seed: int) -> float:
+    # 3) run HPO
+    def step2_obj(cfg, seed):
         metrics = train_modified_gan(
             config, dataset, cp_dir, gan_ckpt, test_noise,
             fid_metrics, c_out_hist,
@@ -195,15 +182,13 @@ def main():
             fixed_noise, num_classes, device, seed,
             wandb.util.generate_id()
         )
-        # guard empty
         if not metrics.stats["fid"] or not metrics.stats["conf_dist"]:
             return float("inf")
-        fid_val = metrics.stats["fid"][-1]
-        cd_val  = metrics.stats["conf_dist"][-1]
-        return w_fid * fid_val + w_cd * cd_val
+        f = metrics.stats["fid"][-1]
+        c = metrics.stats["conf_dist"][-1]
+        return 1.0 * f + 0.001 * c
 
-    # SMAC setup
-    cs       = ConfigurationSpace()
+    cs = ConfigurationSpace()
     cs.add_hyperparameters([
         Float("alpha", (0.0, 5.0), default=1.0),
         Float("var",   (1e-4, 1.0), default=0.01),
@@ -212,24 +197,21 @@ def main():
         cs,
         deterministic=True,
         n_trials=config["train"]["step-2"].get("hpo-trials", 50),
-        walltime_limit=config["train"]["step-2"].get("hpo-walltime", 36000),
+        walltime_limit=config["train"]["step-2"].get("hpo-walltime", 18000),
     )
     smac = HyperparameterOptimizationFacade(scenario, step2_obj, overwrite=True)
-
-    print("Starting SMAC HPO step‑2 …")
     incumbent = smac.optimize()
-    best_cfg   = incumbent.get_dictionary()
+    best_cfg = incumbent.get_dictionary()
 
-    # save JSON of best hyperparams
+    # 4) save best hyperparams
     out_json = os.path.join(
         cp_dir,
         f"step-2-best-gauss-{ds['binary']['pos']}v{ds['binary']['neg']}.json"
     )
     with open(out_json, "w") as f:
         json.dump(best_cfg, f, indent=2)
-    print("→ Saved best hyperparams to", out_json)
 
-    # final evaluation + summary TXT
+    # 5) retrain one final time with best hyperparams
     final_metrics = train_modified_gan(
         config, dataset, cp_dir, gan_ckpt, test_noise,
         fid_metrics, c_out_hist,
@@ -239,11 +221,11 @@ def main():
         gen_seed(), wandb.util.generate_id()
     )
 
+    # 6) write summary text
     fid_list = final_metrics.stats["fid"]
+    cd_list  = final_metrics.stats["conf_dist"]
+    last_fid, last_cd = fid_list[-1], cd_list[-1]
     best_epoch = int(np.argmin(fid_list)) + 1
-
-    last_fid = final_metrics.stats["fid"][-1]
-    last_cd  = final_metrics.stats["conf_dist"][-1]
 
     summary_txt = os.path.join(
         cp_dir,
@@ -255,18 +237,30 @@ def main():
         f.write("Performance metrics:\n")
         f.write(f"  FID       = {last_fid:.4f}\n")
         f.write(f"  Conf_dist = {last_cd:.4f}\n")
-        f.write(f"  Best    Epoch      = {best_epoch}\n")
-    print("→ Saved summary to", summary_txt)
+        f.write(f"  Best Epoch= {best_epoch}\n")
 
-    # optional plots
-    if not args.no_plots:
-        df = pd.DataFrame({
-            "fid":       final_metrics.stats["fid"],
-            "conf_dist": final_metrics.stats["conf_dist"],
-            "hubris":    final_metrics.stats["hubris"],
-            "epoch":     list(range(1, len(final_metrics.stats["fid"]) + 1)),
-        })
-        plot_metrics(df, cp_dir, f"final-{ds['binary']['pos']}v{ds['binary']['neg']}")
+    # 7) generate 10 000 final images from the winning model
+    # locate the best GAN checkpoint directory
+    a, v = best_cfg["alpha"], best_cfg["var"]
+    best_tag = f"{os.path.basename(clf_path)}_gauss_α{a:.3f}_σ{v:.4f}"
+    best_dir = os.path.join(cp_dir, best_tag)
+    G, D, _, _ = construct_gan_from_checkpoint(os.path.join(best_dir, "G_last.pth"), device=device)
+
+    os.makedirs(os.path.join(cp_dir, "final_images"), exist_ok=True)
+    z_dim = config["model"]["z_dim"]
+    with torch.no_grad():
+        z = torch.randn(10000, z_dim, device=device)
+        fake = G(z)
+        # assume tanh output in [-1,1], map to [0,1]
+        fake = (fake + 1) / 2
+        for i in range(10000):
+            save_image(fake[i], os.path.join(cp_dir, "final_images", f"{i:05d}.png"))
+
+    print("→ Step 2 complete.")
+    print("   * Best hyperparams JSON:", out_json)
+    print("   * Summary TXT:", summary_txt)
+    print("   * Best GAN checkpoint in:", best_dir)
+    print("   * 10k images in:", os.path.join(cp_dir, "final_images"))
 
 if __name__ == "__main__":
     main()

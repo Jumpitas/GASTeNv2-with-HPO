@@ -1,137 +1,115 @@
-from sklearn.utils import shuffle
-from tqdm import tqdm
 import argparse
-import torch
-import torch.nn as nn
-import torch.optim as optim
+import os
 import numpy as np
 from dotenv import load_dotenv
-import os
-import seaborn as sns
-import matplotlib.pyplot as plt
+torch = __import__('torch')
+import torch.nn as nn
+import torch.optim as optim
+from tqdm import tqdm
 
 from src.data_loaders import load_dataset
-from src.metrics.accuracy import binary_accuracy, multiclass_accuracy
+from src.metrics.accuracy import multiclass_accuracy
 from src.utils import setup_reprod
 from src.utils.checkpoint import checkpoint, construct_classifier_from_checkpoint
 from src.classifier import construct_classifier
 
 
-def evaluate(C, device, dataloader, criterion, acc_fun, verbose=True, desc='Validate', header=None):
-    # We no longer consider ensemble models, so we simply perform one forward pass
-    training = C.training
-    C.eval()
+def evaluate(model, device, dataloader, criterion, acc_fun, verbose=True, desc='Validate', header=None):
+    """
+    Evaluate the classifier on the given dataloader.
+    """
+    was_training = model.training
+    model.eval()
     running_loss = 0.0
-    running_accuracy = 0.0
-    per_batch_accuracy = []
+    running_corrects = 0
+    per_batch_acc = []
 
-    seq = tqdm(dataloader, desc=desc) if verbose else dataloader
+    loader = tqdm(dataloader, desc=desc) if verbose else dataloader
+    if header:
+        print(f"\n--- {header} ---\n")
 
-    if header is not None:
-        print("\n --- {} ---\n".format(header))
+    with torch.no_grad():
+        for inputs, labels in loader:
+            inputs = inputs.to(device)
+            # Ensure labels are integer type for CrossEntropyLoss
+            labels = labels.to(device).long()
 
-    for i, data in enumerate(seq, 0):
-        X, y = data
-        X = X.to(device)
-        y = y.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            preds = outputs.argmax(dim=1)
 
-        with torch.no_grad():
-            # Directly compute the output and loss from a single classifier
-            # Assume C returns a tuple where the last element is the final prediction.
-            y_total = C(X, output_feature_maps=True)
-            y_hat = y_total[-1]
-            loss = criterion(y_hat, y)
-            running_accuracy += acc_fun(y_hat, y, avg=False)
-            running_loss += loss.item() * X.shape[0]
-            # Optionally, if you want to compute accuracy on intermediate outputs,
-            # you can use y_total[0] (or another index), but here we keep it simple.
-            per_batch_accuracy.append(acc_fun(y_hat, y, avg=True))
+            running_loss += loss.item() * inputs.size(0)
+            running_corrects += torch.sum(preds == labels).item()
+            per_batch_acc.append((preds == labels).float().mean().item())
 
-    acc = running_accuracy / len(dataloader.dataset)
-    loss = running_loss / len(dataloader.dataset)
+    dataset_size = len(dataloader.dataset)
+    epoch_loss = running_loss / dataset_size
+    epoch_acc = running_corrects / dataset_size
 
-    if training:
-        C.train()
+    if was_training:
+        model.train()
 
-    per_batch_accuracy = np.array(per_batch_accuracy)
-    print("Average classifier accuracy: ", np.mean(per_batch_accuracy, axis=0))
-    return acc.item(), loss
+    print(f"{desc}: Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.4f}")
+    print(f"Average batch accuracy: {np.mean(per_batch_acc):.4f}")
+    return epoch_acc, epoch_loss
 
 
-def default_train_fn(C, X, Y, crit, acc_fun, early_acc=1.0):
-    # For a single classifier, we simply perform a forward pass and compute loss/accuracy.
-    y_hat = C(X)
-    loss = crit(y_hat, Y)
-    acc = acc_fun(y_hat, Y, avg=False)
-    if early_acc > (acc / len(Y)):
-        loss.backward()
-    return loss, acc
-
-
-def train(C, opt, crit, train_loader, val_loader, test_loader, acc_fun, args, name, model_params, device):
+def train(model, optimizer, criterion, train_loader, val_loader, args, name, model_params, device):
     stats = {
         'best_loss': float('inf'),
         'best_epoch': 0,
-        'early_stop_tracker': 0,
-        'cur_epoch': 0,
+        'early_stop_counter': 0,
         'train_acc': [],
         'train_loss': [],
         'val_acc': [],
         'val_loss': []
     }
 
-    C.train()
-    # Use only one stage ("train") for simplicity.
-    C_fn = default_train_fn
-
-    for epoch in range(args.epochs):
-        stats['cur_epoch'] = epoch
-        print("\n --- Epoch {} ---\n".format(epoch + 1), flush=True)
-
-        running_accuracy = 0.0
+    model.train()
+    for epoch in range(1, args.epochs + 1):
+        print(f"\n--- Epoch {epoch}/{args.epochs} ---\n")
         running_loss = 0.0
+        running_corrects = 0
 
-        for i, data in enumerate(tqdm(train_loader, desc='Train'), 0):
-            X, y = data
-            X = X.to(device)
-            y = y.to(device)
+        for inputs, labels in tqdm(train_loader, desc='Train'):
+            inputs = inputs.to(device)
+            # Ensure labels are integer type
+            labels = labels.to(device).long()
 
-            opt.zero_grad()
-            loss, acc = C_fn(C, X, y, crit, acc_fun, args.early_acc)
-            opt.step()
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            preds = outputs.argmax(dim=1)
 
-            running_accuracy += acc
-            running_loss += loss.item() * X.shape[0]
+            loss.backward()
+            optimizer.step()
 
-        train_loss = running_loss / len(train_loader.dataset)
-        train_acc = running_accuracy / len(train_loader.dataset)
-        stats['train_acc'].append(train_acc.item())
-        stats['train_loss'].append(train_loss)
+            running_loss += loss.item() * inputs.size(0)
+            running_corrects += torch.sum(preds == labels).item()
 
-        print("Train: Loss: {}".format(train_loss), flush=True)
-        print("Train: Accuracy: {}".format(train_acc), flush=True)
+        epoch_loss = running_loss / len(train_loader.dataset)
+        epoch_acc = running_corrects / len(train_loader.dataset)
+        stats['train_loss'].append(epoch_loss)
+        stats['train_acc'].append(epoch_acc)
 
-        val_acc, val_loss = evaluate(C, device, val_loader, crit, acc_fun, verbose=True)
+        print(f"Train: Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.4f}")
+
+        val_acc, val_loss = evaluate(model, device, val_loader, criterion, multiclass_accuracy)
         stats['val_acc'].append(val_acc)
         stats['val_loss'].append(val_loss)
-
-        print("Validation: Loss: {}".format(val_loss), flush=True)
-        print("Validation: Accuracy: {}".format(val_acc), flush=True)
 
         if val_loss < stats['best_loss']:
             stats['best_loss'] = val_loss
             stats['best_epoch'] = epoch
-            stats['early_stop_tracker'] = 0
-
-            cp_path = checkpoint(C, name, model_params, stats, args, output_dir=args.out_dir)
-            print("")
-            print(' > Saved checkpoint to {}'.format(cp_path))
+            stats['early_stop_counter'] = 0
+            cp_path = checkpoint(model, name, model_params, stats, args, output_dir=args.out_dir)
+            print(f"Saved checkpoint: {cp_path}")
         else:
-            if args.early_stop is not None:
-                stats['early_stop_tracker'] += 1
-                print("")
-                print(" > Early stop counter: {}/{}".format(stats['early_stop_tracker'], args.early_stop))
-                if stats['early_stop_tracker'] == args.early_stop:
+            if args.early_stop:
+                stats['early_stop_counter'] += 1
+                print(f"Early stop count: {stats['early_stop_counter']}/{args.early_stop}")
+                if stats['early_stop_counter'] >= args.early_stop:
+                    print("Early stopping triggered")
                     break
 
     return stats, cp_path
@@ -139,113 +117,75 @@ def train(C, opt, crit, train_loader, val_loader, test_loader, acc_fun, args, na
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data-dir', dest='data_dir', default=f"{os.environ['FILESDIR']}/data", help='Path to dataset')
-    parser.add_argument('--out-dir', dest='out_dir', default=f"{os.environ['FILESDIR']}/models", help='Path to generated files')
-    parser.add_argument('--name', dest='name', default=None, help='Name of the classifier for output files')
-    parser.add_argument('--dataset', dest='dataset_name', default='mnist', help='Dataset (mnist or fashion-mnist)')
-    parser.add_argument('--pos', dest='pos_class', default=7, type=int, help='Positive class for binary classification')
-    parser.add_argument('--neg', dest='neg_class', default=1, type=int, help='Negative class for binary classification')
-    parser.add_argument('--batch-size', dest='batch_size', type=int, default=64, help='Batch size')
-    parser.add_argument('--classifier-type', dest='c_type', type=str, help='"cnn" or "mlp"', default='mlp')
-    parser.add_argument('--epochs', type=int, default=2, help='Number of epochs to train for')
-    parser.add_argument('--early-stop', dest='early_stop', type=int, default=None, help='Early stopping criteria')
-    parser.add_argument('--early-acc', dest='early_acc', type=float, default=1.0, help='Early accuracy criteria')
-    parser.add_argument('--lr', type=float, default=5e-4, help='ADAM opt learning rate')
-    parser.add_argument('--nf', type=str, default=2, help='Num features')
-    parser.add_argument('--seed', default=None, type=int, help='Seed')
-    parser.add_argument('--device', default='cuda:0', help='Device to run experiments (cpu, cuda:0, cuda:1, ...')
+    parser.add_argument('--data-dir', default=os.environ.get('FILESDIR', '.') + '/data', help='Dataset path')
+    parser.add_argument('--out-dir', default=os.environ.get('FILESDIR', '.') + '/models', help='Output directory')
+    parser.add_argument('--name', default=None, help='Experiment name')
+    parser.add_argument('--dataset', dest='dataset_name', default='mnist', help='Dataset name')
+    parser.add_argument('--pos', dest='pos_class', type=int, default=0, help='Positive class (binary)')
+    parser.add_argument('--neg', dest='neg_class', type=int, default=1, help='Negative class (binary)')
+    parser.add_argument('--batch-size', type=int, default=64, help='Batch size')
+    parser.add_argument('--classifier-type', dest='c_type', default='mlp', help='Model architecture')
+    parser.add_argument('--nf', type=int, default=2, help='Base number of features')
+    parser.add_argument('--epochs', type=int, default=10, help='Number of epochs')
+    parser.add_argument('--early-stop', type=int, default=None, help='Patience for early stopping')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
+    parser.add_argument('--seed', type=int, default=None, help='Random seed')
+    parser.add_argument('--device', default='cpu', help='Device (cpu or cuda)')
     return parser.parse_args()
 
 
 def main():
     load_dotenv()
     args = parse_args()
-    print(args)
-
-    seed = np.random.randint(100000) if args.seed is None else args.seed
+    # set seed
+    seed = args.seed if args.seed is not None else np.random.randint(0, 100000)
     setup_reprod(seed)
-    args.seed = seed
-    print(" > Seed", args.seed)
+    print(f"Seed: {seed}")
 
-    args.nf = eval(args.nf)
-    device = torch.device("cpu" if args.device is None else args.device)
-    print(" > Using device", device)
-    name = '{}-{}-{}.{}'.format(args.c_type, args.nf, args.epochs, args.seed) if args.name is None else args.name
+    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
-    dset_name = args.dataset_name
-    dataset, num_classes, img_size = load_dataset(args.dataset_name, args.data_dir, pos_class=args.pos_class, neg_class=args.neg_class)
+    # Load data
+    dataset, num_classes, img_size = load_dataset(
+        args.dataset_name,
+        args.data_dir,
+        pos_class=args.pos_class,
+        neg_class=args.neg_class
+    )
+    print(f"Dataset: {args.dataset_name}, Classes: {num_classes}")
 
-    print(" > Using dataset", args.dataset_name)
-    binary_classification = num_classes == 2
-    if binary_classification:
-        print("\t> Binary classification between ", args.pos_class, "and", args.neg_class)
-        dset_name = '{}.{}v{}'.format(dset_name, args.pos_class, args.neg_class)
+    # Split
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_set, val_set = torch.utils.data.random_split(dataset, [train_size, val_size])
+    train_loader = torch.utils.data.DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
+    val_loader   = torch.utils.data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False)
 
-    out_dir = os.path.join(args.out_dir, dset_name)
-    train_set, val_set = torch.utils.data.random_split(dataset, [int(5/6*len(dataset)), len(dataset) - int(5/6*len(dataset))])
-    train_loader = torch.utils.data.DataLoader(train_set, batch_size=args.batch_size, shuffle=shuffle)
-    val_loader = torch.utils.data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False)
-    test_set = load_dataset(args.dataset_name, args.data_dir, args.pos_class, args.neg_class, train=False)[0]
-    test_loader = torch.utils.data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
+    # Model
+    model_params = {
+        'type': args.c_type,
+        'img_size': img_size,
+        'nf': args.nf,
+        'n_classes': num_classes
+    }
+    model = construct_classifier(model_params, device=device)
+    print(model)
 
-    model_params = {'type': args.c_type, 'img_size': img_size, 'nf': args.nf, 'n_classes': num_classes}
+    # Loss and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    C = construct_classifier(model_params, device=device)
-    print(C, flush=True)
-    opt = optim.Adam(C.parameters(), lr=args.lr)
+    # Train
+    name = args.name or f"{args.c_type}-{args.nf}-{args.epochs}-{seed}"
+    stats, checkpoint_path = train(
+        model, optimizer, criterion, train_loader, val_loader,
+        args, name, model_params, device
+    )
 
-    if binary_classification:
-        criterion = nn.BCELoss()
-        acc_fun = binary_accuracy
-    else:
-        criterion = nn.CrossEntropyLoss()
-        acc_fun = multiclass_accuracy
-
-    stats, cp_path = train(C, opt, criterion, train_loader, val_loader, test_loader, acc_fun, args, name, model_params, device)
-
-    best_C = construct_classifier_from_checkpoint(cp_path, device=device)[0]
-    print("\n")
-    print(" > Loading checkpoint from best epoch for testing ...")
-    test_acc, test_loss = evaluate(best_C, device, test_loader, criterion, acc_fun, desc='Test', header='Test')
-    stats['test_acc'] = test_acc
-    stats['test_loss'] = test_loss
-    print('Test acc. =', test_acc)
-    print('test loss. =', test_loss)
-    cp_path = checkpoint(best_C, name, model_params, stats, args, output_dir=args.out_dir)
-
-    train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
-    train_y_hat = torch.zeros_like(dataset.targets, dtype=float)
-    i = 0
-    for X, y in train_dataloader:
-        with torch.no_grad():
-            y_hat = best_C(X.to(device))
-        train_y_hat[i:i+y_hat.size(0)] = y_hat
-        i += y_hat.size(0)
-
-    test_dataloader = torch.utils.data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
-    test_y_hat = torch.zeros_like(test_set.targets, dtype=float)
-    i = 0
-    for X, y in test_dataloader:
-        with torch.no_grad():
-            y_hat = best_C(X.to(device))
-        test_y_hat[i:i+y_hat.size(0)] = y_hat
-        i += y_hat.size(0)
-
-    np.save(os.path.join(cp_path, 'train_y_hat'), train_y_hat.cpu(), allow_pickle=False)
-    np.save(os.path.join(cp_path, 'test_y_hat'), test_y_hat.cpu(), allow_pickle=False)
-    sns.histplot(data=train_y_hat.cpu(), stat='proportion', bins=20)
-    plt.savefig(os.path.join(cp_path, 'train_y_hat.svg'), dpi=300)
-    plt.clf()
-    sns.histplot(data=test_y_hat.cpu(), stat='proportion', bins=20)
-    plt.savefig(os.path.join(cp_path, 'test_y_hat.svg'), dpi=300)
-
-    print('')
-    print(' > Saved checkpoint to {}'.format(cp_path))
-    print('')
-    print(cp_path)
-    print(test_acc)
-    print(test_loss)
-
+    # Load best and validate
+    best_model, *_ = construct_classifier_from_checkpoint(checkpoint_path, device=device)
+    print("Evaluating on validation set with best checkpoint...")
+    evaluate(best_model, device, val_loader, criterion, multiclass_accuracy, desc='Val(best)', header='Best Model Validation')
 
 if __name__ == '__main__':
     main()

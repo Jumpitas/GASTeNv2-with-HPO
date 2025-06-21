@@ -1,59 +1,99 @@
-# AmbiGANs
+# GASTeNv2-with-HPO
+*Generative Adversarial Stress-Test Networks + Hyper-Parameter Optimisation*
 
 ![License](https://img.shields.io/static/v1?label=license&message=CC-BY-NC-ND-4.0&color=green)
 
-Variation of GANs that, generates realistic data that is classiﬁed with low conﬁdence by an set of classifiers. Results show that the approach is able to generate images that are closer to the frontier when compared to the original ones, but still realistic. Manual inspection conﬁrms that some of those images are confusing even for humans.
+`GASTeNv2-with-HPO` builds on the original **GASTeN** and adds:
 
+* **Gaussian ambiguity loss (v2)**
+* Two-stage **SMAC** hyper-parameter optimisation
+* A pluggable **classifier zoo** (CNN, MLP, ResNet-18, ViT-Small, ConvNeXt-Tiny …)
+* Community contributions  
+  * [Catia’s GASTeNv2 fork](https://github.com/catianag/GASTeNv2) — Gaussian-loss ideas  
+  * [Luuk’s GASTeN-HPO](https://github.com/luukgr/GASTeN-HPO) — early SMAC sweeps  
 
-## Create Virtual Environment
+The trained GAN **generates realistic boundary samples** that expose classifier blind-spots and often fool humans.
 
-```ssh
-mamba create -n ambigan python=3.10
-mamba activate ambigan
-mamba install pip-tools
-```
+---
 
-## Run
+## 1 · Quick Start
 
-### .env file
+```bash
+# 1 — clean Python 3.10 environment
+mamba create -n gasten python=3.10      # or conda / venv
+mamba activate gasten
+pip install -r requirements.txt         # torch, timm, smac, wandb, …
 
-Create .env file with the following information
-```yaml
+# 2 — minimal .env  (adjust paths!)
+cat > .env <<'EOF'
 CUDA_VISIBLE_DEVICES=0
-FILESDIR=<file directory>
-ENTITY=<wandb entity to track experiments>
-```
+FILESDIR=/abs/path/for/large_files      # ≈30 GB free
+ENTITY=my-wandb-team
+EOF
 
-### Preparation
+# 3 — fetch a dataset (example: MNIST)
+python -m src.data_loaders --download mnist --root $FILESDIR/data
+````
 
-| Step | Description | Command |
-|------|-------------|---------|
-| 1    | Create FID score for all pairs of numbers | `python src/gen_pairwise_inception.py` |
-| 1.1  | Run for one pair only (e.g. 7v1) | `python -m src.metrics.fid --data data/ --dataset mnist --pos 7 --neg 1` |
-| 2.a    | Create set of random classifiers with mean output estimator, given a pair of numbers (e.g. 7vs1) | `python src/gen_classifiers.py --classifier-type ensemble:cnn:mean --pos 7 --neg 1 --epochs 50 --nf 50 --seed 4441 --batch-size 816` |
-| 2.b  | Create with linear output estimator | `python src/gen_classifiers.py --classifier-type ensemble:cnn:linear --pos 7 --neg 1 --epochs 50 --nf 50 --seed 4441 --batch-size 816` |
-| 2.c  | Create with meta-learner output estimator | `python src/gen_classifiers.py --classifier-type ensemble:cnn:meta-learner --pos 7 --neg 1 --epochs 50 --nf 50 --seed 4441 --batch-size 816` |
-| 3    | create test noise | `python src/gen_test_noise.py --nz 2048 --z-dim 64` |
+---
 
-* In this example, in step 2 50 random CNNs will be created and trained during 50 epochs. Reproducibility of the CNN parameters is guaranteed by using the same random seed (--seed arg).
+## 2 · Preparation Pipeline
 
-* If the user wants to specify an ensemble architecture, it can be specified in the following way (only for --classifier-type ensemble:cnn):
+| Step | Purpose                                            | Example command                                                                                                       |
+| ---- | -------------------------------------------------- |-----------------------------------------------------------------------------------------------------------------------|
+| 1    | **FID reference stats** for *all* class pairs      | `python src/gen_pairwise_inception.py --dataset mnist`                                                                |
+| 1′   | Stats for one pair (7 v 1)                         | `python -m src.metrics.fid --data $FILESDIR/data --dataset mnist --pos 7 --neg 1`                                     |
+| 2    | Train a **classifier** (CNN / MLP / ResNet / …)    | `python src/gen_classifiers.py --classifier-type cnn --pos 7 --neg 1 --epochs 50 --nf 50 --seed 4441 --dataset mnist` |
+| 3    | Generate **fixed noise pool** (for FID & coverage) | `python src/gen_test_noise.py --nz 2048 --z-dim 64`                                                                   |
 
-    ```
-    --nf 4-8,8-16-32,20
-    ```
+> **Custom CNN widths**: `--nf 4-8,8-16-32,20` ⇒ three CNNs of depth 2, 3 and 1.
 
-    Three CNN are specified: the first with 2 layers. The first layer has 4 filters and the second 8. The second has 3 layers (8, 16 and 32 filters). Finally the last CNN has a single layer with 20 filters.
+---
 
-### AmbiGAN Training
+## 3 · Two-Stage HPO Training
 
-Run AmbiGAN to create images in the bounday between **7** and **1**.
+| Stage      | Goal                                         | Entry-point                                              | Minimal run                                                                                                                |
+| ---------- | -------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **Step-1** | Find a base GAN (good FID)                   | `src/optimization/gasten_bayesian_optimization_step1.py` | <br>`bash\npython -m src.optimization.gasten_bayesian_optimization_step1 \\\n  --config experiments/mnist-7v1_step1.yml\n` |
+| **Step-2** | Fine-tune with Gaussian loss (search α, σ …) | `src/optimization/gasten_bayesian_optimization_step2.py` | <br>`bash\npython -m src.optimization.gasten_bayesian_optimization_step2 \\\n  --config experiments/mnist-7v1_step2.yml\n` |
 
-`python -m src --config experiments/ensemble/mnist-7v1_dcgan_v2.yml`
+Each stage writes a **JSON** (best hyper-params) and a **TXT** summary (FID & Ambiguity CD).
 
-* For the "No-Ouput" variants, user must do step 2.a and specify one of the available experiments in `experiments/ensemble` folder that have the `unique` keyword in the filename (e.g.: `experiments/ensemble/mnist-7v1_unique_dcgan_v2.yml`) - loss type: `kl-div` or `gaussian-v2`.
+Swap YAMLs to target different datasets, networks or HPO budgets.
 
-## Credits
+---
+
+## 4 · Supported Datasets
+
+| Dataset         | Resolution | Channels | Notes            |
+| --------------- | ---------- | -------- | ---------------- |
+| MNIST           | 28 × 28    | 1        | baseline         |
+| Fashion-MNIST   | 28 × 28    | 1        | harder textures  |
+| CIFAR-10        | 32 × 32    | 3        | colour           |
+| STL-10          | 96 × 96    | 3        | larger, few-shot |
+| ChestXRay       | 128 × 128  | 3        | medical          |
+| ImageNet subset | 224 × 224  | 3        | scalability demo |
+
+---
+
+## 5 · Highlights
+
+* **Gaussian ambiguity loss** (α, σ tuned by SMAC)
+* Two-stage **HPO** (learning rate, β values, ResBlocks, …)
+* **Classifier zoo**: CNN, MLP, ResNet-18 (frozen / finetune), ViT-Small, ConvNeXt-Tiny
+* **Deterministic & reproducible** (global + worker seeds)
+* **Seamless W\&B logging** (`WANDB_DISABLED=true` to skip)
+* Metrics: **FID**, Ambiguity Classifier Distance, Precision / Recall, Hubris, histograms
+* Unified checkpoints for easy resume & comparison
 
 
-This work started with the framework from previous developments of GASTeN from [luispcunha](https://github.com/luispcunha), published as [GASTeN: Generative Adversarial Stress Test Networks](https://link.springer.com/epdf/10.1007/978-3-031-30047-9_8?sharing_token=XGbq9zmVBDFAEaM4r1AAp_e4RwlQNchNByi7wbcMAY55SAL6inraGCkI72KOuzssTzewKWv51v_1pft7j7WJRbiAzL0vaTmG2vf4gs1QhnZ3lV72H7zSKLWQESXZjq5-1pg77WEnt2EHZaN2b51chvHsO6TW3tiGXSVhUgy87Ts%3D)
+---
+
+## 7 · License & Credits
+
+| Item                | Source                                                    |
+| ------------------- | --------------------------------------------------------- |
+| Code                | **CC BY-NC-ND 4.0** – research & teaching only            |
+| Foundation          | [luispcunha/GASTeN](https://github.com/luispcunha/GASTeN) |
+| Gaussian loss ideas | [Catia’s GASTeNv2](https://github.com/catianag/GASTeNv2)  |
+| SMAC workflow       | [Luuk’s GASTeN-HPO](https://github.com/luukgr/GASTeN-HPO) |
