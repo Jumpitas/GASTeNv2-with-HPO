@@ -110,6 +110,7 @@ def main():
             print(f"→ Using {torch.cuda.device_count()} GPUs with DataParallel")
             G = torch.nn.DataParallel(G)
             D = torch.nn.DataParallel(D)
+            G.z_dim = G.module.z_dim
         G = G.to(device)
         D = D.to(device)
         g_updater = UpdateGeneratorGAN(g_crit)
