@@ -105,6 +105,13 @@ def main():
         # build GAN and losses
         G, D = construct_gan(config["model"], img_size, device)
         g_crit, d_crit = construct_loss(config["model"]["loss"], D)
+        # multi‐GPU via DataParallel
+        if torch.cuda.device_count() > 1:
+            print(f"→ Using {torch.cuda.device_count()} GPUs with DataParallel")
+            G = torch.nn.DataParallel(G)
+            D = torch.nn.DataParallel(D)
+        G = G.to(device)
+        D = D.to(device)
         g_updater = UpdateGeneratorGAN(g_crit)
 
         g_opt = Adam(G.parameters(), lr=params['g_lr'], betas=(params['g_beta1'], params['g_beta2']))
