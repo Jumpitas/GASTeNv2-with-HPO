@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import os
 import argparse
 import random
@@ -20,9 +19,6 @@ from captum.attr import GradientShap
 
 from src.utils.checkpoint import construct_classifier_from_checkpoint
 from src.data_loaders     import load_dataset
-from src.metrics.fid import FID
-from src.metrics.fid.fid_score    import load_statistics_from_path
-from src.metrics.fid.inception   import get_inception_feature_map_fn
 
 
 def parse_args():
@@ -86,7 +82,9 @@ def plot_umap(Z: np.ndarray, idxs: list, out_dir: Path, name: str):
 def save_heatmaps(protos: torch.Tensor, clf: nn.Module,
                   device: torch.device, out_dir: Path, C_in: int):
     gs = GradientShap(clf)
-    baselines = torch.zeros_like(protos).to(device)
+    # baseline set to all -1 (pure black after normalization)
+    baselines = torch.full_like(protos, fill_value=-1.0).to(device)
+
     for i, x in enumerate(protos):
         x = x.unsqueeze(0).to(device)
         attr = gs.attribute(x, baselines=baselines[i:i+1], n_samples=50)
@@ -165,7 +163,7 @@ def main():
     border_all = all_imgs[mask]
     M = len(border_all); print(f"{M} borderline samples (|p-0.5|<0.1)")
 
-    # 5) pick your  samples
+    # 5) pick your samples
     if args.pick=="random":
         idxs = random.sample(range(M), min(args.n_samples, M))
     else:
@@ -206,7 +204,6 @@ def main():
         Ec = E_border[cls_idx]
         D  = np.linalg.norm(Ec[:,None]-Ec[None,:], axis=-1)
         prototypes_idx.append(int(cls_idx[D.sum(1).argmin()]))
-
     baseline_idx = random.sample(range(Z_border.shape[0]), len(prototypes_idx))
 
     plot_umap(Z_border, baseline_idx, out_dir, "baseline")
@@ -216,7 +213,7 @@ def main():
     prototypes = border[prototypes_idx]
     save_heatmaps(prototypes, clf, device, out_dir, C_in)
 
-    print("[✓] Done – outputs in", out_dir.resolve())
+    print("Done – outputs in", out_dir.resolve())
 
 
 if __name__ == "__main__":
