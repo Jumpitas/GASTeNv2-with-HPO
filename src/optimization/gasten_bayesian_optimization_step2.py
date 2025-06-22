@@ -7,6 +7,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 import torch
+import torch.nn as nn
 import wandb
 from torchvision.utils import save_image
 
@@ -37,20 +38,23 @@ from src.gan import construct_loss
 from smac import HyperparameterOptimizationFacade, Scenario
 from ConfigSpace import ConfigurationSpace, Float
 
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True, help="Path to YAML config")
     p.add_argument("--no-plots", action="store_true", help="Skip final plotting")
     return p.parse_args()
 
+
 def construct_optimizers(opt_cfg, G, D):
-    g_optim = torch.optim.Adam(G.parameters(),
-                               lr=opt_cfg["lr"],
-                               betas=(opt_cfg["beta1"], opt_cfg["beta2"]))
-    d_optim = torch.optim.Adam(D.parameters(),
-                               lr=opt_cfg["lr"],
-                               betas=(opt_cfg["beta1"], opt_cfg["beta2"]))
+    g_optim = torch.optim.Adam(
+        G.parameters(), lr=opt_cfg["lr"], betas=(opt_cfg["beta1"], opt_cfg["beta2"])
+    )
+    d_optim = torch.optim.Adam(
+        D.parameters(), lr=opt_cfg["lr"], betas=(opt_cfg["beta1"], opt_cfg["beta2"])
+    )
     return g_optim, d_optim
+
 
 def train_modified_gan(
     config, dataset, cp_dir, gan_ckpt, test_noise,
@@ -72,15 +76,30 @@ def train_modified_gan(
     out_dir  = os.path.join(cp_dir, run_name)
     os.makedirs(out_dir, exist_ok=True)
 
-    # load pretrained GAN from step-1
-    G, D, _, _ = construct_gan_from_checkpoint(gan_ckpt, device=device)
+    # load pretrained GAN from step-1 onto CPU
+    G, D, _, _ = construct_gan_from_checkpoint(gan_ckpt, device=torch.device("cpu"))
+
+    # ─── wrap for multi-GPU ───
+    if torch.cuda.device_count() > 1:
+        print(f"→ Using {torch.cuda.device_count()} GPUs with DataParallel")
+        G = nn.DataParallel(G)
+        D = nn.DataParallel(D)
+        # propagate z_dim if your model uses it
+        if hasattr(G.module, "z_dim"):
+            G.z_dim = G.module.z_dim
+    # move to primary device (cuda:0)
+    G = G.to(device)
+    D = D.to(device)
+    # ──────────────────────────
+
+    # build losses, optimizers, updater
     g_crit, d_crit = construct_loss(config["model"]["loss"], D)
     g_opt, d_opt  = construct_optimizers(config["optimizer"], G, D)
     g_updater     = updater_cls(g_crit, C, alpha=a, var=v)
 
     # training hyperparams
-    tcfg = config["train"]["step-2"]
-    bs, nepochs = tcfg["batch-size"], tcfg["epochs"]
+    tcfg       = config["train"]["step-2"]
+    bs, nepochs= tcfg["batch-size"], tcfg["epochs"]
     nd, chk_every = tcfg["disc-iters"], tcfg["checkpoint-every"]
     early_crit = tcfg.get("early-stop", {}).get("criteria", None)
     early_stop = ("conf_dist", early_crit) if early_crit is not None else ("conf_dist", None)
@@ -124,6 +143,7 @@ def train_modified_gan(
     wandb.finish()
     return metrics
 
+
 def main():
     load_dotenv()
     args   = parse_args()
@@ -131,8 +151,10 @@ def main():
 
     # 1) find step-1 best GAN checkpoint
     ds = config["dataset"]
-    patt = (f"results/step-1-best-config-"
-            f"{ds['name']}-{ds['binary']['pos']}v{ds['binary']['neg']}.txt")
+    patt = (
+        f"results/step-1-best-config-"
+        f"{ds['name']}-{ds['binary']['pos']}v{ds['binary']['neg']}.txt"
+    )
     files = glob.glob(patt)
     assert files, f"No step-1 config for {patt}"
     gan_ckpt = open(files[0]).read().strip()
@@ -240,18 +262,18 @@ def main():
         f.write(f"  Best Epoch= {best_epoch}\n")
 
     # 7) generate 10 000 final images from the winning model
-    # locate the best GAN checkpoint directory
     a, v = best_cfg["alpha"], best_cfg["var"]
     best_tag = f"{os.path.basename(clf_path)}_gauss_α{a:.3f}_σ{v:.4f}"
     best_dir = os.path.join(cp_dir, best_tag)
-    G, D, _, _ = construct_gan_from_checkpoint(os.path.join(best_dir, "G_last.pth"), device=device)
+    G, D, _, _ = construct_gan_from_checkpoint(
+        os.path.join(best_dir, "G_last.pth"), device=device
+    )
 
     os.makedirs(os.path.join(cp_dir, "final_images"), exist_ok=True)
     z_dim = config["model"]["z_dim"]
     with torch.no_grad():
         z = torch.randn(10000, z_dim, device=device)
         fake = G(z)
-        # assume tanh output in [-1,1], map to [0,1]
         fake = (fake + 1) / 2
         for i in range(10000):
             save_image(fake[i], os.path.join(cp_dir, "final_images", f"{i:05d}.png"))
@@ -261,6 +283,7 @@ def main():
     print("   * Summary TXT:", summary_txt)
     print("   * Best GAN checkpoint in:", best_dir)
     print("   * 10k images in:", os.path.join(cp_dir, "final_images"))
+
 
 if __name__ == "__main__":
     main()
