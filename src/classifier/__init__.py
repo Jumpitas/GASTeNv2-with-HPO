@@ -3,91 +3,89 @@ import torch.nn as nn
 import timm
 
 
-# ---------------------------------------------------------------------
-# helper: transparent wrapper that upsamples small inputs to target_sz
-# ---------------------------------------------------------------------
-class _PadTo32AndForward(nn.Module):
-    """If the incoming image is < 32 px, resize to 32×32 before the backbone."""
-    def __init__(self, backbone: nn.Module, target_sz: int = 32):
+# ------------------------------------------------------------------
+# helper: up-sample very small inputs to 32×32 before the backbone
+# ------------------------------------------------------------------
+class _PadAndForward(nn.Module):
+    """Upscale inputs (< tgt_sz) to tgt_sz×tgt_sz and run the backbone."""
+    def __init__(self, backbone: nn.Module, tgt_sz: int = 32):
         super().__init__()
-        self.backbone   = backbone
-        self.target_sz  = target_sz
-        self.resize_bn  = nn.Upsample(
-            size=target_sz, mode="bilinear", align_corners=False
-        )
+        self.backbone  = backbone
+        self.tgt_sz    = tgt_sz
+        self.resizer   = nn.Upsample(size=tgt_sz,
+                                     mode="bilinear",
+                                     align_corners=False)
 
     def forward(self, x: torch.Tensor):
-        if x.shape[-1] != self.target_sz:
-            x = self.resize_bn(x)
+        if x.shape[-1] < self.tgt_sz:          # H (== W)  – for square inputs
+            x = self.resizer(x)
         return self.backbone(x)
 
 
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------------
 # public factory
-# ---------------------------------------------------------------------
-def construct_classifier(params: dict, device: str | torch.device | None = None):
+# ------------------------------------------------------------------
+def construct_classifier(params: dict,
+                         device: str | torch.device | None = None) -> nn.Module:
     """
-    Build a TIMM backbone that also copes with 28×28 grey-scale inputs
-    (MNIST / Fashion-MNIST) by up-sampling to 32×32 whenever required.
+    Build a TIMM classifier that copes with many datasets/sizes:
 
-    params
-    -------
-    type       : TIMM model name — e.g. 'vit_tiny_patch16_32', 'convnext_tiny'.
-                 Prefix with 'frozen_' to freeze the backbone.
-    img_size   : tuple  (C, H, W)
-    n_classes  : int
+    * 28×28   (MNIST / Fashion-MNIST)      – up-sample to 32
+    * 32×32   (CIFAR)                      – native
+    * 96×96   (STL-10)                     – native
+    * 128×128 (Chest X-ray)                – native / ViT rebuilt
+    * 224×224 (ImageNet)                   – native
     """
-    model_type  = params["type"]
-    n_classes   = params["n_classes"]
-    in_chans    = params.get("img_size", (3,))[0]          # infer C
-    in_size     = params.get("img_size", (None, 28, 28))[1]  # infer H (28 for MNIST)
+    mtype      = params["type"]                  # possibly 'frozen_*'
+    n_cls      = params["n_classes"]
+    C, H, _    = params.get("img_size", (3, 28, 28))
 
-    # -- Optional "frozen_" prefix -------------------------------------
-    freeze_backbone = False
-    if model_type.startswith("frozen_"):
-        freeze_backbone = True
-        model_type = model_type[len("frozen_"):]
-    # ------------------------------------------------------------------
+    # ------------ optional "frozen_" prefix --------------------------
+    freeze = False
+    if mtype.startswith("frozen_"):
+        freeze = True
+        mtype  = mtype[len("frozen_"):]
+    # -----------------------------------------------------------------
 
-    if model_type not in timm.list_models():
-        raise ValueError(f"Unknown TIMM model '{model_type}'")
+    if mtype not in timm.list_models():
+        raise ValueError(f"Unknown TIMM model '{mtype}'")
 
-    # ---- decide whether the backbone takes an `img_size=` kw ----------
-    accepts_img_size = any(
-        token in model_type
-        for token in ("vit", "deit", "beit", "tnt", "pit", "swin", "cait")
-    )
+    # ---- does this backbone support an explicit img_size kwarg? -----
+    vit_families = ("vit", "deit", "beit", "tnt", "pit",
+                    "swin", "cait", "pvt", "mvit", "eva")
+    accepts_img_size = any(tok in mtype for tok in vit_families)
 
-    # ---- common kwargs -----------------------------------------------
     timm_kwargs = dict(
         pretrained=True,
-        in_chans=in_chans,
-        num_classes=n_classes,
+        in_chans=C,
+        num_classes=n_cls,
     )
 
-    wrap_resize = False
-    if in_size < 32:
-        # Up-sample inputs to 32×32 so ConvNeXt / ViT stages don’t break.
-        wrap_resize = True
-        if accepts_img_size:
-            # ViT-family – tell timm to build weights for 32×32.
-            timm_kwargs["img_size"] = 32
+    # Re-build positional embeddings if needed (e.g. 128-pixel chest X-ray)
+    if accepts_img_size and H != 224:
+        if H % 8 != 0:                         # patch-based models need /8
+            raise ValueError(
+                f"{mtype} requires img_size multiple of the patch size; "
+                f"you passed {H}."
+            )
+        timm_kwargs["img_size"] = H
 
-    # ---- create the backbone -----------------------------------------
-    backbone = timm.create_model(model_type, **timm_kwargs)
+    # -----------------------------------------------------------------
+    backbone: nn.Module = timm.create_model(mtype, **timm_kwargs)
+    # -----------------------------------------------------------------
 
-    # ---- optionally freeze everything but the classifier head ---------
-    if freeze_backbone:
+    # Optionally freeze the backbone except the classifier head
+    if freeze:
         for p in backbone.parameters():
             p.requires_grad = False
         for p in backbone.get_classifier().parameters():
             p.requires_grad = True
 
+    # Up-sample only if really tiny (<32 px)
     model: nn.Module = (
-        _PadTo32AndForward(backbone, target_sz=32) if wrap_resize else backbone
+        _PadAndForward(backbone, tgt_sz=32) if H < 32 else backbone
     )
 
-    # ---- move to device ----------------------------------------------
     if device is not None:
         model = model.to(device)
 
