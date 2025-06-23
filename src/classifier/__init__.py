@@ -50,7 +50,6 @@ def construct_classifier(params: dict,
     if mtype not in timm.list_models():
         raise ValueError(f"Unknown TIMM model '{mtype}'")
 
-    # ---- does this backbone support an explicit img_size kwarg? -----
     vit_families = ("vit", "deit", "beit", "tnt", "pit",
                     "swin", "cait", "pvt", "mvit", "eva")
     accepts_img_size = any(tok in mtype for tok in vit_families)
