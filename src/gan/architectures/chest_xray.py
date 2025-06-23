@@ -111,6 +111,8 @@ class Generator(nn.Module):
         c, h, w = image_size
         max_blocks = max(int(math.log2(min(h, w))) - 2, 1)
         self.n_blocks = min(n_blocks, max_blocks)
+        # store latent dim so G.z_dim works
+        self.z_dim = z_dim
 
         self.init_h = h // (2 ** self.n_blocks)
         self.init_w = w // (2 ** self.n_blocks)
@@ -199,6 +201,9 @@ def build_cxr_g(z_dim: int = 128, base_ch: int = 64) -> Generator:
 
 def build_cxr_d(base_ch: int = 64, critic: bool = False) -> Discriminator:
     return Discriminator(
-        (1, 128, 128), filter_dim=base_ch, n_blocks=4,
-        is_critic=critic, use_batch_norm=True
+        (1, 128, 128),
+        filter_dim=base_ch,
+        n_blocks=4,
+        is_critic=critic,
+        use_batch_norm=True
     )
