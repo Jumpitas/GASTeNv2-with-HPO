@@ -77,21 +77,16 @@ def construct_gan(config, img_size, device):
             is_critic=is_critic,
         ).to(device)
 
-
     elif arch["name"] == "stl10_sagan":
-        # Build for the real dataset size (img_size) and pass z_dim as keyword.
-        if isinstance(img_size, int):
-            img_shape = (3, img_size, img_size)  # e.g. (3, 32, 32) or (3, 96, 96)
-        else:
-            img_shape = (3, *img_size)  # already (H, W)
+        # Just hand `img_size` straight through—SA_G/SA_D will parse it internally
         G = SA_G(
-            img_shape,  # first positional = (C,H,W)
+            img_size,
             z_dim=config["z_dim"],
             filter_dim=arch["g_filter_dim"],
             n_blocks=arch["g_num_blocks"],
         ).to(device)
         D = SA_D(
-            img_shape,
+            img_size,
             filter_dim=arch["d_filter_dim"],
             n_blocks=arch["d_num_blocks"],
             is_critic=is_critic,
@@ -125,7 +120,6 @@ def construct_loss(config, D):
         return W_GeneratorLoss(), WGP_DiscriminatorLoss(D, config["args"]["lambda"])
 
     elif name == "hinge-r1":
-        # Hinge discriminator + R1 penalty
         lmbda = config["args"]["lambda"]
         return W_GeneratorLoss(), HingeR1_DiscriminatorLoss(D, lmbda)
 
