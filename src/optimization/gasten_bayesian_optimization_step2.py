@@ -3,13 +3,15 @@ import glob
 import json
 import argparse
 import numpy as np
-import pandas as pd
 from dotenv import load_dotenv
 
 import torch
 import torch.nn as nn
 import wandb
+
 from torchvision.utils import save_image
+from smac import HyperparameterOptimizationFacade, Scenario
+from ConfigSpace import ConfigurationSpace, Float
 
 from src.metrics.fid.fid_score import load_statistics_from_path
 from src.metrics.fid.inception import get_inception_feature_map_fn
@@ -22,21 +24,13 @@ from src.gan.update_g import (
     UpdateGeneratorGASTEN_gaussianV2,
 )
 from src.metrics.c_output_hist import OutputsHistogram
-from src.utils import (
-    load_z,
-    set_seed,
-    gen_seed,
-    create_checkpoint_path,
-)
+from src.utils import load_z, set_seed, gen_seed, create_checkpoint_path
 from src.utils.config import read_config
 from src.utils.checkpoint import (
     construct_gan_from_checkpoint,
     construct_classifier_from_checkpoint,
 )
 from src.gan import construct_loss
-
-from smac import HyperparameterOptimizationFacade, Scenario
-from ConfigSpace import ConfigurationSpace, Float
 
 
 def parse_args():
@@ -79,30 +73,26 @@ def train_modified_gan(
     # load pretrained GAN from step-1 onto CPU
     G, D, _, _ = construct_gan_from_checkpoint(gan_ckpt, device=torch.device("cpu"))
 
-    # ─── wrap for multi-GPU ───
+    # multi-GPU wrap
     if torch.cuda.device_count() > 1:
-        print(f"→ Using {torch.cuda.device_count()} GPUs with DataParallel")
         G = nn.DataParallel(G)
         D = nn.DataParallel(D)
-        # propagate z_dim if your model uses it
         if hasattr(G.module, "z_dim"):
             G.z_dim = G.module.z_dim
-    # move to primary device (cuda:0)
-    G = G.to(device)
-    D = D.to(device)
-    # ──────────────────────────
+
+    G, D = G.to(device), D.to(device)
 
     # build losses, optimizers, updater
     g_crit, d_crit = construct_loss(config["model"]["loss"], D)
-    g_opt, d_opt  = construct_optimizers(config["optimizer"], G, D)
-    g_updater     = updater_cls(g_crit, C, alpha=a, var=v)
+    g_opt, d_opt   = construct_optimizers(config["optimizer"], G, D)
+    g_updater      = updater_cls(g_crit, C, alpha=a, var=v)
 
     # training hyperparams
-    tcfg       = config["train"]["step-2"]
-    bs, nepochs= tcfg["batch-size"], tcfg["epochs"]
-    nd, chk_every = tcfg["disc-iters"], tcfg["checkpoint-every"]
-    early_crit = tcfg.get("early-stop", {}).get("criteria", None)
-    early_stop = ("conf_dist", early_crit) if early_crit is not None else ("conf_dist", None)
+    tcfg         = config["train"]["step-2"]
+    bs, nepochs  = tcfg["batch-size"], tcfg["epochs"]
+    nd, chk_every= tcfg["disc-iters"], tcfg["checkpoint-every"]
+    early_crit   = tcfg.get("early-stop", {}).get("criteria", None)
+    early_stop   = ("conf_dist", early_crit) if early_crit is not None else ("conf_dist", None)
 
     # reproducibility
     set_seed(seed)
@@ -149,18 +139,15 @@ def main():
     args   = parse_args()
     config = read_config(args.config)
 
-    # 1) find step-1 best GAN checkpoint
-    ds = config["dataset"]
-    patt = (
-        f"results/step-1-best-config-"
-        f"{ds['name']}-{ds['binary']['pos']}v{ds['binary']['neg']}.txt"
-    )
+    # 1) locate step-1 checkpoint
+    ds    = config["dataset"]
+    patt  = f"results/step-1-best-config-{ds['name']}-{ds['binary']['pos']}v{ds['binary']['neg']}.txt"
     files = glob.glob(patt)
     assert files, f"No step-1 config for {patt}"
     gan_ckpt = open(files[0]).read().strip()
 
     # 2) prepare data, classifier & FID
-    device = torch.device(config["device"])
+    device         = torch.device(config["device"])
     dataset, num_classes, _ = load_dataset(
         ds["name"], config["data-dir"],
         ds["binary"]["pos"], ds["binary"]["neg"]
@@ -179,7 +166,7 @@ def main():
     fm_fn, dims  = get_inception_feature_map_fn(device)
     original_fid = FID(fm_fn, dims, test_noise.size(0), mu, sigma, device=device)
 
-    clf_path = config["train"]["step-2"]["classifier"][0]
+    clf_path          = config["train"]["step-2"]["classifier"][0]
     C, C_p, C_s, C_a = construct_classifier_from_checkpoint(clf_path, device=device)
     C.eval()
 
@@ -190,11 +177,10 @@ def main():
     }
     c_out_hist = None if args.no_plots else OutputsHistogram(C, test_noise.size(0))
 
-    # where all step-2 outputs go
+    # 3) run HPO
     run_id = wandb.util.generate_id()
     cp_dir = create_checkpoint_path(config, run_id)
 
-    # 3) run HPO
     def step2_obj(cfg, seed):
         metrics = train_modified_gan(
             config, dataset, cp_dir, gan_ckpt, test_noise,
@@ -215,17 +201,18 @@ def main():
         Float("alpha", (0.0, 5.0), default=1.0),
         Float("var",   (1e-4, 1.0), default=0.01),
     ])
+
     scenario = Scenario(
         cs,
-        deterministic=True,
-        n_trials=config["train"]["step-2"].get("hpo-trials", 50),
-        walltime_limit=config["train"]["step-2"].get("hpo-walltime", 18000),
+        deterministic   = True,
+        n_trials        = config["train"]["step-2"].get("hpo-trials", 50),
+        walltime_limit  = config["train"]["step-2"].get("hpo-walltime", 18000),
     )
-    smac = HyperparameterOptimizationFacade(scenario, step2_obj, overwrite=True)
-    incumbent = smac.optimize()
-    best_cfg = incumbent.get_dictionary()
+    smac       = HyperparameterOptimizationFacade(scenario, step2_obj, overwrite=True)
+    incumbent  = smac.optimize()
+    best_cfg   = incumbent.get_dictionary()
 
-    # 4) save best hyperparams
+    # 4) save best hyperparameters
     out_json = os.path.join(
         cp_dir,
         f"step-2-best-gauss-{ds['binary']['pos']}v{ds['binary']['neg']}.json"
@@ -233,7 +220,7 @@ def main():
     with open(out_json, "w") as f:
         json.dump(best_cfg, f, indent=2)
 
-    # 5) retrain one final time with best hyperparams
+    # 5) retrain once more with best hyperparameters
     final_metrics = train_modified_gan(
         config, dataset, cp_dir, gan_ckpt, test_noise,
         fid_metrics, c_out_hist,
@@ -243,7 +230,7 @@ def main():
         gen_seed(), wandb.util.generate_id()
     )
 
-    # 6) write summary text
+    # 6) write summary
     fid_list = final_metrics.stats["fid"]
     cd_list  = final_metrics.stats["conf_dist"]
     last_fid, last_cd = fid_list[-1], cd_list[-1]
@@ -261,28 +248,9 @@ def main():
         f.write(f"  Conf_dist = {last_cd:.4f}\n")
         f.write(f"  Best Epoch= {best_epoch}\n")
 
-    # 7) generate 10 000 final images from the winning model
-    a, v = best_cfg["alpha"], best_cfg["var"]
-    best_tag = f"{os.path.basename(clf_path)}_gauss_α{a:.3f}_σ{v:.4f}"
-    best_dir = os.path.join(cp_dir, best_tag)
-    G, D, _, _ = construct_gan_from_checkpoint(
-        os.path.join(best_dir, "G_last.pth"), device=device
-    )
-
-    os.makedirs(os.path.join(cp_dir, "final_images"), exist_ok=True)
-    z_dim = config["model"]["z_dim"]
-    with torch.no_grad():
-        z = torch.randn(10000, z_dim, device=device)
-        fake = G(z)
-        fake = (fake + 1) / 2
-        for i in range(10000):
-            save_image(fake[i], os.path.join(cp_dir, "final_images", f"{i:05d}.png"))
-
     print("→ Step 2 complete.")
-    print("   * Best hyperparams JSON:", out_json)
-    print("   * Summary TXT:", summary_txt)
-    print("   * Best GAN checkpoint in:", best_dir)
-    print("   * 10k images in:", os.path.join(cp_dir, "final_images"))
+    print(f"   * Best hyperparams JSON: {out_json}")
+    print(f"   * Summary TXT:            {summary_txt}")
 
 
 if __name__ == "__main__":
