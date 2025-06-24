@@ -17,3 +17,4 @@ wandb==0.20.1         # :contentReference[oaicite:8]{index=8}
 python-dotenv==1.1.0  # :contentReference[oaicite:9]{index=9}
 matplotlib==3.10.3    # :contentReference[oaicite:10]{index=10}
 schema==0.7.7         # :contentReference[oaicite:11]{index=11}
+seaborn
