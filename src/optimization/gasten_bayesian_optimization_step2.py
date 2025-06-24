@@ -206,7 +206,7 @@ def main():
         cs,
         deterministic   = True,
         n_trials        = config["train"]["step-2"].get("hpo-trials", 50),
-        walltime_limit  = config["train"]["step-2"].get("hpo-walltime", 18000),
+        walltime_limit  = config["train"]["step-2"].get("hpo-walltime", 10000),
     )
     smac       = HyperparameterOptimizationFacade(scenario, step2_obj, overwrite=True)
     incumbent  = smac.optimize()
