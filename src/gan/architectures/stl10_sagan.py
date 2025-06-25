@@ -107,26 +107,37 @@ class Generator(nn.Module):
 
 # ───── Discriminator ─────
 class Discriminator(nn.Module):
-    def __init__(self,
-                 img_size: tuple[int,int,int] = (1,128,128),
-                 fmap: int = 64,
-                 **_):
+    def __init__(
+        self,
+        img_size: tuple[int, int, int] = (3, 96, 96),
+        fmap: int = 64,
+        n_blocks: int = 4,
+        is_critic: bool = False,
+        **_
+    ):
         super().__init__()
-        c,h,_ = img_size
-        log = int(math.log2(h))
-        layers=[spectral_norm(nn.Conv2d(c,fmap,3,1,1))]
-        in_ch = fmap
-        for _ in range(log-2):
-            out_ch = min(fmap*16, in_ch*2)
-            layers.append(DBlock(in_ch,out_ch))
-            in_ch = out_ch
-        self.blocks = nn.Sequential(*layers)
-        self.final  = spectral_norm(nn.Linear(in_ch*4*4, 1))
-        self.apply(he)
+        c, h, _ = img_size
+        # make sure we never down-sample past 4×4
+        max_b = max(int(math.log2(min(h, _))) - 2, 1)
+        self.n_blocks = min(n_blocks, max_b)
 
-    def forward(self, x):
-        x = self.blocks(x)
-        return self.final(x.flatten(1)).view(-1)
+        res = h // (2 ** self.n_blocks)          # spatial size after blocks
+        layers = [spectral_norm(nn.Conv2d(c, fmap, 3, 1, 1))]
+        in_ch  = fmap
+        for _ in range(self.n_blocks):
+            out_ch = min(fmap * 16, in_ch * 2)
+            layers.append(DBlock(in_ch, out_ch))
+            in_ch  = out_ch
+            res   //= 2
+
+        self.features = nn.Sequential(*layers)
+        self.final_fc = spectral_norm(nn.Linear(in_ch * res * res, 1))
+        self.act_out  = nn.Identity() if is_critic else nn.Sigmoid()
+        self.apply(weights_init)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.features(x)
+        return self.act_out(self.final_fc(h.flatten(1))).view(-1)
 
 # ───── public builders ─────
 def build_cxr_g(z_dim=128, base_ch=64):
