@@ -186,7 +186,7 @@ def main():
         Float("d_beta2", (0.9, 0.9999), default=0.999),
         Integer("n_blocks", (1, 4), default=3),
     ])
-    scenario = Scenario(cs, deterministic=True, n_trials=3, walltime_limit=16000)
+    scenario = Scenario(cs, deterministic=True, n_trials=3, walltime_limit=20000)
     smac = HyperparameterOptimizationFacade(scenario, train, overwrite=True)
     incumbent = smac.optimize()
 
