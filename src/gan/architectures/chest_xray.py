@@ -1,209 +1,159 @@
+# style_cxr_gan.py
 from __future__ import annotations
-import math
+import math, random, functools
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils import spectral_norm
 
-# ────────────────────────────────────────────────────────────────────
-# Helpers
-# ────────────────────────────────────────────────────────────────────
-class ScaledConv2d(nn.Conv2d):
-    """He-style weight scaling à-la StyleGAN (works better with Leaky-ReLU)."""
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # scale weights at runtime
-        w = self.weight * (2 / self.weight[0].numel())**0.5
-        return F.conv2d(x, w, self.bias, self.stride,
-                        self.padding, self.dilation, self.groups)
+###############################################################################
+# Utils
+###############################################################################
+def pixel_norm(x, eps=1e-8):
+    return x * torch.rsqrt(torch.mean(x**2, dim=1, keepdim=True) + eps)
 
-class Swish(nn.Module):
-    """SiLU / Swish activation."""
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.sigmoid(x)
-
-def weights_init(m: nn.Module) -> None:
-    """Orthogonal init for Conv/Linear, normal for norms."""
+def he_init(m: nn.Module):
     if isinstance(m, (nn.Conv2d, nn.Linear)):
-        nn.init.orthogonal_(m.weight)
-        if m.bias is not None:
-            nn.init.zeros_(m.bias)
-    elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d)):
-        nn.init.normal_(m.weight, 1.0, 0.02)
-        nn.init.zeros_(m.bias)
+        nn.init.kaiming_normal_(m.weight, a=0.2)
+        if m.bias is not None: nn.init.zeros_(m.bias)
 
-# ────────────────────────────────────────────────────────────────────
-# Self-Attention block (SAGAN)
-# ────────────────────────────────────────────────────────────────────
-class SelfAttention(nn.Module):
-    def __init__(self, ch: int):
+###############################################################################
+# Mapping network (8-layer MLP)
+###############################################################################
+class Mapping(nn.Sequential):
+    def __init__(self, z_dim=128, w_dim=512, n=8):
+        layers = []
+        for _ in range(n):
+            layers += [nn.Linear(z_dim if not layers else w_dim, w_dim), nn.LeakyReLU(0.2)]
+        super().__init__(*layers)
+        self.apply(he_init)
+
+    def forward(self, z): return pixel_norm(super().forward(z))
+
+###############################################################################
+# Modulated convolution (StyleGAN2)
+###############################################################################
+class ModConv(nn.Module):
+    def __init__(self, in_ch, out_ch, k=3, demod=True):
         super().__init__()
-        self.f = spectral_norm(nn.Conv2d(ch,   ch // 8, 1))
-        self.g = spectral_norm(nn.Conv2d(ch,   ch // 8, 1))
-        self.h = spectral_norm(nn.Conv2d(ch,   ch // 2, 1))
-        self.v = spectral_norm(nn.Conv2d(ch // 2, ch,   1))
-        self.gamma = nn.Parameter(torch.zeros(1))
+        self.weight = nn.Parameter(torch.randn(out_ch, in_ch, k, k))
+        self.mod    = nn.Linear(512, in_ch, bias=True)
+        self.demod  = demod
+        self.k      = k
+        self.pad    = k//2
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, c, h, w = x.size()
-        f = self.f(x).view(b, -1, h * w)                          # B×C/8×HW
-        g = self.g(x).view(b, -1, h * w)                          # B×C/8×HW
-        beta = torch.softmax(torch.bmm(f.permute(0, 2, 1), g), dim=-1)  # B×HW×HW
-        h_ = self.h(x).view(b, -1, h * w)                         # B×C/2×HW
-        o  = torch.bmm(h_, beta).view(b, c // 2, h, w)            # B×C/2×H×W
-        o  = self.v(o)                                            # B×C×H×W
-        return x + self.gamma * o
+    def forward(self, x, w):
+        b, c, h, w_ = x.shape
+        s = self.mod(w).view(b, 1, c, 1, 1) + 1      # style
+        weight = self.weight[None] * s
+        if self.demod:
+            d = torch.rsqrt((weight**2).sum([2,3,4])+1e-8)
+            weight = weight * d.view(b, -1, 1, 1, 1)
+        x = x.view(1, -1, h, w_)
+        wgt = weight.view(-1, c, self.k, self.k)
+        x = F.conv2d(x, wgt, padding=self.pad, groups=b)
+        return x.view(b, -1, h, w_)
 
-# ────────────────────────────────────────────────────────────────────
-# Residual up / down blocks
-# ────────────────────────────────────────────────────────────────────
-class UpBlock(nn.Module):
-    """Nearest-neighbour up-sample + residual 3×3 convs."""
-    def __init__(self, in_ch: int, out_ch: int):
+###############################################################################
+# Generator block
+###############################################################################
+class GBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
         super().__init__()
-        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
-        self.conv1    = ScaledConv2d(in_ch,  out_ch, 3, 1, 1)
-        self.conv2    = ScaledConv2d(out_ch, out_ch, 3, 1, 1)
-        self.skip     = ScaledConv2d(in_ch,  out_ch, 1, 1, 0)
-        self.bn1      = nn.InstanceNorm2d(in_ch,  affine=True)
-        self.bn2      = nn.InstanceNorm2d(out_ch, affine=True)
-        self.act      = nn.LeakyReLU(0.2, inplace=True)
+        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
+        self.conv1 = ModConv(in_ch, out_ch)
+        self.conv2 = ModConv(out_ch, out_ch)
+        self.noise1 = nn.Parameter(torch.zeros(1, out_ch, 1, 1))
+        self.noise2 = nn.Parameter(torch.zeros(1, out_ch, 1, 1))
+        self.act = nn.LeakyReLU(0.2)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = self.act(self.bn1(self.upsample(x)))
-        y = self.conv1(y)
-        y = self.act(self.bn2(y))
-        y = self.conv2(y)
-        skip = self.skip(self.upsample(x))
-        return y + skip
+    def forward(self, x, w):
+        x = self.upsample(x)
+        x = self.conv1(x, w) + self.noise1 * torch.randn_like(x)
+        x = self.act(x)
+        x = self.conv2(x, w) + self.noise2 * torch.randn_like(x)
+        x = self.act(x)
+        return x
 
-class DownBlock(nn.Module):
-    """Residual down-sample 3×3 convs (PatchGAN style)."""
-    def __init__(self, in_ch: int, out_ch: int, use_sn: bool = True):
+###############################################################################
+# StyleGAN-like Generator
+###############################################################################
+class Generator(nn.Module):
+    def __init__(self, img_size=(1,128,128)):
         super().__init__()
-        Conv = (lambda *a, **k: spectral_norm(nn.Conv2d(*a, **k)))
-        self.conv1 = Conv(in_ch, out_ch, 3, 1, 1) if use_sn else nn.Conv2d(in_ch, out_ch, 3, 1, 1)
-        self.conv2 = Conv(out_ch, out_ch, 3, 1, 1) if use_sn else nn.Conv2d(out_ch, out_ch, 3, 1, 1)
-        self.skip  = Conv(in_ch, out_ch, 1, 1, 0)    if use_sn else nn.Conv2d(in_ch, out_ch, 1, 1, 0)
+        c, h, _ = img_size
+        self.mapping = Mapping()
+        fmap_base = 64
+        log_size  = int(math.log2(h))
+        self.const = nn.Parameter(torch.randn(1, fmap_base*16, 4, 4))
+
+        blocks, to_rgbs = [], []
+        in_ch = fmap_base*16
+        for i in range(3, log_size+1):        # 8×8 … 128×128
+            out_ch = max(fmap_base*16 // 2**(i-3), fmap_base)
+            blocks.append(GBlock(in_ch, out_ch))
+            to_rgbs.append(ModConv(out_ch, c, k=1, demod=False))
+            in_ch = out_ch
+        self.blocks = nn.ModuleList(blocks)
+        self.to_rgbs= nn.ModuleList(to_rgbs)
+        self.tanh   = nn.Tanh()
+        self.apply(he_init)
+
+    def forward(self, z):
+        w = self.mapping(z)
+        x = self.const.expand(z.size(0), -1, -1, -1)
+        out = None
+        for blk, rgb in zip(self.blocks, self.to_rgbs):
+            x = blk(x, w)
+            out = rgb(x, w) if out is None else self.upsample(out) + rgb(x, w)
+        return self.tanh(out)
+
+###############################################################################
+# Discriminator block (StyleGAN2 ResNet + SpectralNorm)
+###############################################################################
+class DBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv1 = spectral_norm(nn.Conv2d(in_ch, out_ch, 3, 1, 1))
+        self.conv2 = spectral_norm(nn.Conv2d(out_ch, out_ch, 3, 1, 1))
         self.down  = nn.AvgPool2d(2)
-        self.act   = nn.LeakyReLU(0.2, inplace=True)
+        self.skip  = spectral_norm(nn.Conv2d(in_ch, out_ch, 1))
+        self.act   = nn.LeakyReLU(0.2)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         y = self.act(self.conv1(x))
         y = self.act(self.conv2(y))
         y = self.down(y)
-        skip = self.down(self.skip(x))
-        return y + skip
+        return y + self.down(self.skip(x))
 
-# ────────────────────────────────────────────────────────────────────
-# Generator
-# ────────────────────────────────────────────────────────────────────
-class Generator(nn.Module):
-    def __init__(self,
-                 image_size: tuple[int, int, int] = (1, 128, 128),
-                 z_dim: int = 128,
-                 filter_dim: int = 64,
-                 n_blocks: int = 4):
-        """
-        image_size : (C, H, W) – supports resolutions 32→512.
-                     For CXRs we use 1×128×128 (n_blocks ≥ 4).
-        """
-        super().__init__()
-        c, h, w = image_size
-        max_blocks = max(int(math.log2(min(h, w))) - 2, 1)
-        self.n_blocks = min(n_blocks, max_blocks)
-        # store latent dim so G.z_dim works
-        self.z_dim = z_dim
-
-        self.init_h = h // (2 ** self.n_blocks)
-        self.init_w = w // (2 ** self.n_blocks)
-        self.init_ch = filter_dim * (2 ** self.n_blocks)
-
-        self.project = nn.Sequential(
-            nn.Linear(z_dim, self.init_ch * self.init_h * self.init_w),
-            Swish()
-        )
-
-        blocks = []
-        ch = self.init_ch
-        for i in range(self.n_blocks):
-            nxt = ch // 2
-            blocks.append(UpBlock(ch, nxt))
-            ch = nxt
-            if self.init_h * (2 ** (i + 1)) in (32, 64):
-                blocks.append(SelfAttention(ch))
-        self.up_blocks = nn.Sequential(*blocks)
-
-        self.to_rgb = nn.Sequential(
-            ScaledConv2d(ch, c, 3, 1, 1),
-            nn.Tanh()
-        )
-        self.apply(weights_init)
-
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        x = self.project(z).view(-1, self.init_ch, self.init_h, self.init_w)
-        x = self.up_blocks(x)
-        return self.to_rgb(x)
-
-# ────────────────────────────────────────────────────────────────────
+###############################################################################
 # Discriminator
-# ────────────────────────────────────────────────────────────────────
+###############################################################################
 class Discriminator(nn.Module):
-    def __init__(self,
-                 image_size: tuple[int, int, int] = (1, 128, 128),
-                 filter_dim: int = 64,
-                 n_blocks: int = 4,
-                 is_critic: bool = False,
-                 use_batch_norm: bool = True,
-                 **kwargs):
-        """
-        PatchGAN + global head for better texture & silhouette.
-        """
+    def __init__(self, img_size=(1,128,128)):
         super().__init__()
-        c, h, w = image_size
-        max_blocks = max(int(math.log2(min(h, w))) - 2, 1)
-        self.n_blocks = min(n_blocks, max_blocks)
+        c, h, _ = img_size
+        fmap_base = 64
+        log_size  = int(math.log2(h))
 
-        ch = filter_dim
-        blocks = [DownBlock(c, ch)]
-        res = h // 2
-        for i in range(1, self.n_blocks):
-            nxt = ch * 2
-            blocks.append(DownBlock(ch, nxt))
-            ch = nxt
-            res //= 2
-            if res in (64, 32):
-                blocks.append(SelfAttention(ch))
-        self.features = nn.Sequential(*blocks)            # B×ch×res×res
+        blocks = [spectral_norm(nn.Conv2d(c, fmap_base, 3, 1, 1))]
+        in_ch = fmap_base
+        for i in range(3, log_size+1):
+            out_ch = min(fmap_base*16, in_ch*2)
+            blocks.append(DBlock(in_ch, out_ch))
+            in_ch = out_ch
+        self.blocks = nn.Sequential(*blocks)
+        self.final_conv = spectral_norm(nn.Conv2d(in_ch, in_ch, 3, 1, 1))
+        self.final_dense= spectral_norm(nn.Linear(in_ch*4*4, 1))
 
-        # global head
-        self.global_head = spectral_norm(
-            nn.Conv2d(ch, 1, res, 1, 0)
-        )
-        # 70×70 PatchGAN head
-        self.patch_head = spectral_norm(
-            nn.Conv2d(ch, 1, 4, 1, 0)
-        )
-        self.act_out = nn.Identity() if is_critic else nn.Sigmoid()
-        self.apply(weights_init)
+    def forward(self, x):
+        x = self.blocks(x)
+        x = self.final_conv(x)
+        x = x.view(x.size(0), -1)
+        return self.final_dense(x).view(-1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h    = self.features(x)
-        glob = self.global_head(h).view(x.size(0), -1)   # B×1
-        patch= self.patch_head(h).mean([2, 3])           # avg over H,W
-        out  = glob + patch
-        return self.act_out(out).view(-1)
-
-# ────────────────────────────────────────────────────────────────────
-# Convenient constructors for chest-Xray (1×128×128)
-# ────────────────────────────────────────────────────────────────────
-def build_cxr_g(z_dim: int = 128, base_ch: int = 64) -> Generator:
-    return Generator((1, 128, 128), z_dim=z_dim, filter_dim=base_ch, n_blocks=4)
-
-def build_cxr_d(base_ch: int = 64, critic: bool = False) -> Discriminator:
-    return Discriminator(
-        (1, 128, 128),
-        filter_dim=base_ch,
-        n_blocks=4,
-        is_critic=critic,
-        use_batch_norm=True
-    )
+###############################################################################
+# Convenience builders for your training script
+###############################################################################
+def build_cxr_g(z_dim=128): return Generator((1,128,128))
+def build_cxr_d():           return Discriminator((1,128,128))
