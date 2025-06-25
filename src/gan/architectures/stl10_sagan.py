@@ -53,8 +53,13 @@ class GBlock(nn.Module):
         self.act = nn.LeakyReLU(0.2)
     def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         x = self.up(x)
-        x = self.act(self.c1(x, w) + self.n1 * torch.randn_like(x))
-        x = self.act(self.c2(x, w) + self.n2 * torch.randn_like(x))
+        out1 = self.c1(x,w)
+        noise1= torch.randn_like(out1)
+        x = self.act(out1 + self.n1 * noise1)
+
+        out2 = self.c2(x,w)
+        noise2= torch.randn_like(out2)
+        x = self.act(out2 + self.n2 * noise2)
         return x
 
 class DBlock(nn.Module):
