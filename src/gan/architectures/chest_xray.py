@@ -21,7 +21,7 @@ class SelfAttention(nn.Module):
         self.h = spectral_norm(nn.Conv2d(ch,   ch//2, 1))
         self.v = spectral_norm(nn.Conv2d(ch//2, ch,    1))
         self.gamma = nn.Parameter(torch.zeros(1))
-    def forward(self, x):
+    def forward(self, x, w=None):
         b,c,h,w = x.size()
         f = self.f(x).view(b, -1, h*w)
         g = self.g(x).view(b, -1, h*w)
