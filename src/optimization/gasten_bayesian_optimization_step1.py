@@ -1,207 +1,207 @@
-import torch
-from ConfigSpace import Configuration, ConfigurationSpace, Float, Integer
-from smac import HyperparameterOptimizationFacade, Scenario
-from torch.optim import Adam
-import argparse
+# src/optimization/gasten_bayesian_optimization_step1.py
+from __future__ import annotations
+import argparse, math, os, shutil, torch
 from dotenv import load_dotenv
+
+from ConfigSpace import Configuration, ConfigurationSpace, Float, Integer
+from smac import Scenario, HyperparameterOptimizationFacade
+from torch.optim import Adam
 import wandb
-import os
-import math
-import shutil
 
 from src.utils.config import read_config
-from src.gan import construct_gan, construct_loss
 from src.data_loaders import load_dataset
-from src.gan.update_g import UpdateGeneratorGAN
 from src.metrics import fid
-from src.utils import MetricsLogger, group_images
-from src.gan.train import train_disc, train_gen, loss_terms_to_str, evaluate
+from src.utils import (
+    MetricsLogger, group_images, load_z, seed_worker,
+    setup_reprod, create_checkpoint_path
+)
+from src.gan import construct_gan, construct_loss
+from src.gan.update_g import UpdateGeneratorGAN
+from src.gan.train import train_disc, train_gen, evaluate        # <- wrappers still work
 from src.utils.checkpoint import checkpoint_gan
-from src.utils import load_z, setup_reprod, create_checkpoint_path, seed_worker
 
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config", dest="config_path",
-        required=True, help="Path to the experiment YAML config"
-    )
-    return parser.parse_args()
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", required=True, help="YAML experiment config")
+    p.add_argument("--trials", type=int, default=40,
+                   help="SMAC budget (default 40)")
+    p.add_argument("--walltime", type=int, default=20_000,
+                   help="SMAC wall-time limit (s)")
+    return p.parse_args()
 
 
-def main():
+# --------------------------------------------------------------------------- #
+def main() -> None:
     load_dotenv()
-    args = parse_args()
-    config = read_config(args.config_path)
-    device = torch.device(config["device"])
+    args   = parse_args()
+    cfg    = read_config(args.config)
+    device = torch.device(cfg["device"])
 
-    # extract dataset settings from config
-    ds_cfg = config["dataset"]
-    pos_class = ds_cfg["binary"]["pos"]
-    neg_class = ds_cfg["binary"]["neg"]
+    # ------------------------------------------------------------- dataset ---
+    ds_cfg = cfg["dataset"]
+    pos_cls, neg_cls = ds_cfg["binary"]["pos"], ds_cfg["binary"]["neg"]
     dataset_name = ds_cfg["name"]
 
-    # load dataset
-    dataset, num_classes, img_size = load_dataset(
-        dataset_name, config["data-dir"], pos_class, neg_class
+    dataset, _, img_size = load_dataset(
+        dataset_name, cfg["data-dir"], pos_cls, neg_cls
     )
+    cfg["model"]["image-size"] = list(img_size)
 
-    config['model']['image-size'] = list(img_size)
-    n_disc_iters = config['train']['step-1']['disc-iters']
-    test_noise, _ = load_z(config['test-noise'])
-    batch_size = config['train']['step-1']['batch-size']
+    batch_size   = cfg["train"]["step-1"]["batch-size"]
+    n_disc_iters = cfg["train"]["step-1"]["disc-iters"]
 
-    # use config’s fid-stats-path
-    fid_stats_path = config["fid-stats-path"]
-    mu, sigma = fid.load_statistics_from_path(fid_stats_path)
-    fm_fn, dims = fid.get_inception_feature_map_fn(device)
-    original_fid = fid.FID(
-        fm_fn, dims, test_noise.size(0), mu, sigma, device=device
-    )
-    fid_metrics = {'fid': original_fid}
+    # ------------------------------------------------------------- FID setup -
+    fm, dims      = fid.get_inception_feature_map_fn(device)
+    mu, sigma     = fid.load_statistics_from_path(cfg["fid-stats-path"])
+    test_noise, _ = load_z(cfg["test-noise"])
+    test_noise    = torch.randn(10_000, cfg["model"]["z_dim"], device=device)
+    fid_metric    = fid.FID(fm, dims, test_noise.size(0), mu, sigma, device)
+    fid_metrics   = {"fid": fid_metric}
 
     fixed_noise = torch.randn(
-        config['fixed-noise'], config['model']['z_dim'], device=device
+        cfg["fixed-noise"], cfg["model"]["z_dim"], device=device
     )
 
-    dataloader = torch.utils.data.DataLoader(
+    dl = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size, shuffle=True, drop_last=True,
-        num_workers=config['num-workers'], worker_init_fn=seed_worker
+        num_workers=cfg["num-workers"], worker_init_fn=seed_worker
     )
 
-    # update project name and checkpoint path
-    config["project"] = f"{config['project']}-{pos_class}v{neg_class}"
-    run_id = wandb.util.generate_id()
-    cp_dir = create_checkpoint_path(config, run_id)
-
-    best_so_far = float('inf')
+    # -------------------------------------------------------- bookkeeping ----
+    cfg["project"] += f"-{pos_cls}v{neg_cls}"
+    run_id  = wandb.util.generate_id()
+    cp_root = create_checkpoint_path(cfg, run_id)
+    best_fid = float("inf")
 
     wandb.init(
-        project=config["project"],
-        group=config["name"],
-        entity=os.environ['ENTITY'],
-        job_type='step-1',
-        name=f'{run_id}-step-1',
-        config={
-            'id': run_id,
-            'gan': config['model'],
-            'train': config['train']['step-1']
-        },
+        project=cfg["project"],
+        name=f"{run_id}-step1",
+        group=cfg["name"],
+        entity=os.environ["ENTITY"],
+        job_type="step-1",
+        config={"id": run_id,
+                "gan":   cfg["model"],
+                "train": cfg["train"]["step-1"]}
     )
 
-    train_metrics = MetricsLogger(prefix='train')
-    eval_metrics = MetricsLogger(prefix='eval')
-    train_metrics.add('G_loss', iteration_metric=True)
-    train_metrics.add('D_loss', iteration_metric=True)
-
-    def train(params: Configuration, seed) -> float:
-        nonlocal best_so_far
+    # ---------------------------------------------------------------- target -
+    def objective(params: Configuration, seed: int) -> float:
+        nonlocal best_fid
         setup_reprod(seed)
 
-        # update num_blocks
-        config['model']["architecture"]['g_num_blocks'] = params['n_blocks']
-        config['model']["architecture"]['d_num_blocks'] = params['n_blocks']
+        # ------------ hyper-param injection -------------------------------
+        arch = cfg["model"]["architecture"]
+        arch["g_num_blocks"] = arch["d_num_blocks"] = params["n_blocks"]
 
-        # build GAN and losses
-        G, D = construct_gan(config["model"], img_size, device)
-        g_crit, d_crit = construct_loss(config["model"]["loss"], D)
-        # multi‐GPU via DataParallel
+        # ------------ build  +  optimisers -------------------------------
+        G, D = construct_gan(cfg["model"], img_size, device)
+        g_crit, d_crit = construct_loss(cfg["model"]["loss"], D)
+
         if torch.cuda.device_count() > 1:
-            print(f"→ Using {torch.cuda.device_count()} GPUs with DataParallel")
-            G = torch.nn.DataParallel(G)
-            D = torch.nn.DataParallel(D)
-            G.z_dim = G.module.z_dim
-        G = G.to(device)
-        D = D.to(device)
-        g_updater = UpdateGeneratorGAN(g_crit)
+            G, D = torch.nn.DataParallel(G), torch.nn.DataParallel(D)
+            G.z_dim = G.module.z_dim     # expose latent dim
 
-        g_opt = Adam(G.parameters(), lr=params['g_lr'], betas=(params['g_beta1'], params['g_beta2']))
-        d_opt = Adam(D.parameters(), lr=params['d_lr'], betas=(params['d_beta1'], params['d_beta2']))
+        G, D = G.to(device), D.to(device)
+        g_up  = UpdateGeneratorGAN(g_crit)
 
-        for term in g_updater.get_loss_terms():
-            train_metrics.add(term, iteration_metric=True)
-        for term in d_crit.get_loss_terms():
-            train_metrics.add(term, iteration_metric=True)
-        for name in fid_metrics.keys():
-            eval_metrics.add(name)
-        eval_metrics.add_media_metric('samples')
+        g_opt = Adam(G.parameters(), lr=params["g_lr"],
+                     betas=(params["g_beta1"], params["g_beta2"]))
+        d_opt = Adam(D.parameters(), lr=params["d_lr"],
+                     betas=(params["d_beta1"], params["d_beta2"]))
 
-        G.train(); D.train()
-        iters_per_epoch = (len(dataloader) // n_disc_iters) * n_disc_iters
-        epochs = config['train']['step-1'].get('epochs', 30)
+        # ------------ loggers --------------------------------------------
+        tr_log, ev_log = MetricsLogger("train"), MetricsLogger("eval")
+        tr_log.add("G_loss", True); tr_log.add("D_loss", True)
+        for t in g_up.get_loss_terms() + d_crit.get_loss_terms():
+            tr_log.add(t, True)
+        for m in fid_metrics: ev_log.add(m)
+        ev_log.add_media_metric("samples")
 
-        for epoch in range(1, epochs):
-            data_iter = iter(dataloader)
-            curr_g = 0
+        # ------------ training loop --------------------------------------
+        epochs          = cfg["train"]["step-1"].get("epochs", 30)
+        iters_per_epoch = (len(dl) // n_disc_iters) * n_disc_iters
+
+        for ep in range(1, epochs + 1):
+            it_dl = iter(dl)
             for i in range(1, iters_per_epoch + 1):
-                real, _ = next(data_iter)
-                real = real.to(device)
-                d_loss, _ = train_disc(G, D, d_opt, d_crit, real, batch_size, train_metrics, device)
+                real, _ = next(it_dl)
+                train_disc(G, D, d_opt, d_crit,
+                           real.to(device), batch_size, tr_log, device)
                 if i % n_disc_iters == 0:
-                    curr_g += 1
-                    g_loss, _ = train_gen(g_updater, G, D, g_opt, batch_size, train_metrics, device)
-                    if curr_g % config.get('log-every', 50) == 0:
-                        print(f"Epoch {epoch}/{epochs-1}, G_loss={g_loss:.4f}, D_loss={d_loss:.4f}")
+                    train_gen(g_up, G, D, g_opt,
+                              batch_size, tr_log, device)
 
-            G.eval()
-            fake_chunks = []
-            chunks_size = 64
+            # ---- evaluation -----------------------------------------
             with torch.no_grad():
-                for i in range(0,fixed_noise.size(0), chunks_size):
-                    z_chunk = fixed_noise[i:i+chunks_size]
-                    fake_chunks.append(G(z_chunk).cpu())
-                fake = G(fixed_noise).cpu()
-            G.train()
+                G.eval(); fake = G(fixed_noise).cpu(); G.train()
+            ev_log.log_image("samples",
+                             group_images(fake, None, device))
 
-            eval_metrics.log_image('samples', group_images(fake, classifier=None, device=device))
-            train_metrics.finalize_epoch()
-            if config.get("compute-fid", True):
-                evaluate(G, fid_metrics, eval_metrics, batch_size, test_noise, device, None)
-            eval_metrics.finalize_epoch()
+            tr_log.finalize_epoch()
 
-        # checkpoint & prune
-        run_folder = os.path.join(cp_dir, str(params.config_id))
+            evaluate(
+                G, fid_metrics, ev_log, batch_size,
+                test_noise, device, c_out_hist=None,
+                rgb_repeat=True         # <-- only name changed
+            )
+            ev_log.finalize_epoch()
+
+        # ------------ checkpoint & prune ------------------------------
+        run_dir = os.path.join(cp_root, str(params.config_id))
+        os.makedirs(run_dir, exist_ok=True)
         checkpoint_gan(
             G, D, g_opt, d_opt, None,
-            {'eval': eval_metrics.stats, 'train': train_metrics.stats},
-            config, output_dir=run_folder
+            {"eval": ev_log.stats, "train": tr_log.stats},
+            cfg, output_dir=run_dir
         )
 
-        final_fid = eval_metrics.stats['fid'][-1]
-        if final_fid < best_so_far:
-            best_so_far = final_fid
-        else:
-            shutil.rmtree(run_folder, ignore_errors=True)
+        final_fid = ev_log.stats["fid"][-1]
+        best_fid  = min(best_fid, final_fid)
+        if final_fid > best_fid:
+            shutil.rmtree(run_dir, ignore_errors=True)
 
         return final_fid
 
-    # hyperparameter space
-    cs = ConfigurationSpace()
-    cs.add_hyperparameters([
-        Float("g_lr", (1e-4, 5e-4), default=2e-4, log=True),
-        Float("d_lr", (1e-4, 5e-4), default=2e-4, log=True),
+    # -------------------------------------------------- SMAC search space ----
+    hp_space = ConfigurationSpace()
+    hp_space.add_hyperparameters([
+        Float("g_lr",  (1e-4, 5e-4), default=2e-4, log=True),
+        Float("d_lr",  (1e-4, 5e-4), default=2e-4, log=True),
         Float("g_beta1", (0.0, 0.9), default=0.5),
         Float("d_beta1", (0.0, 0.9), default=0.5),
         Float("g_beta2", (0.9, 0.9999), default=0.999),
         Float("d_beta2", (0.9, 0.9999), default=0.999),
-        Integer("n_blocks", (1, 4), default=3),
+        Integer("n_blocks",
+                (4, 5) if dataset_name in {"stl10", "chest-xray"}
+                else (3, 4),
+                default=4),
     ])
-    scenario = Scenario(cs, deterministic=True, n_trials=3, walltime_limit=20000)
-    smac = HyperparameterOptimizationFacade(scenario, train, overwrite=True)
+
+    scenario = Scenario(
+        hp_space, deterministic=True,
+        n_trials=args.trials, walltime_limit=args.walltime
+    )
+    smac      = HyperparameterOptimizationFacade(scenario, objective,
+                                                 overwrite=True)
     incumbent = smac.optimize()
 
-    best_config = dict(incumbent)
-    out_file = os.path.join(
-        os.environ['FILESDIR'],
-        f"step-1-best-config-{dataset_name}-{pos_class}v{neg_class}.txt"
+    # ------------------------------------------------------ save winner ------
+    best_dir = os.path.join(cp_root, str(incumbent.config_id))
+    out_path = os.path.join(
+        os.environ["FILESDIR"],
+        f"step1-best-{dataset_name}-{pos_cls}v{neg_cls}.txt"
     )
-    with open(out_file, 'w') as f:
-        f.write(os.path.join(cp_dir, str(incumbent.config_id)))
+    with open(out_path, "w") as f:
+        f.write(best_dir)
 
-    print(f"Saved best config to {out_file}")
-    print("Best Configuration:", best_config)
+    print("Best config:", dict(incumbent))
+    print("Saved checkpoint dir →", best_dir)
     wandb.finish()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

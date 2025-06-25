@@ -1,278 +1,253 @@
-import torch
-from src.utils.checkpoint import checkpoint_gan, checkpoint_image
-from src.utils import seed_worker
-from tqdm import tqdm
+from __future__ import annotations
 import math
-from src.utils import MetricsLogger, group_images
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+from src.utils import (
+    MetricsLogger,
+    seed_worker,
+    group_images,
+)
+from src.utils.checkpoint import checkpoint_gan, checkpoint_image
 
-def loss_terms_to_str(loss_items):
-    result = ''
-    for key, value in loss_items.items():
-        result += '%s: %.4f ' % (key, value)
 
-    return result
+# ────────────────────────────────────────────────────────────────
+# helpers
+# ────────────────────────────────────────────────────────────────
+def loss_terms_to_str(loss_items: dict[str, float]) -> str:
+    return " ".join(f"{k}: {v:.4f}" for k, v in loss_items.items())
 
 
-def evaluate(G, fid_metrics, stats_logger, batch_size, test_noise, device, c_out_hist):
-    # Compute evaluation metrics on fixed noise (Z) set
-    training = G.training
+# ────────────────────────────────────────────────────────────────
+# evaluation on a fixed Z-set
+# ────────────────────────────────────────────────────────────────
+def evaluate(
+    G,
+    fid_metrics: dict[str, object],
+    stats_logger: MetricsLogger,
+    batch_size: int,
+    test_noise: torch.Tensor,
+    device: torch.device,
+    c_out_hist=None,
+    *,
+    rgb_repeat: bool = False,          # for 1-ch datasets (e.g. MNIST)
+) -> None:
+    was_training = G.training
     G.eval()
 
-    start_idx = 0
-    num_batches = math.ceil(test_noise.size(0) / batch_size)
+    n_batches = math.ceil(test_noise.size(0) / batch_size)
+    start = 0
 
-    for _ in tqdm(range(num_batches), desc="Evaluating"):
-        real_size = min(batch_size, test_noise.size(0) - start_idx)
-
-        batch_z = test_noise[start_idx:start_idx + real_size]
+    for _ in tqdm(range(n_batches), desc="Evaluating", leave=False):
+        real_sz = min(batch_size, test_noise.size(0) - start)
+        z_batch = test_noise[start : start + real_sz]
 
         with torch.no_grad():
-            batch_gen = G(batch_z.to(device))
+            gen_batch = G(z_batch.to(device))
 
-        for metric_name, metric in fid_metrics.items():
-            metric.update(batch_gen, (start_idx, real_size))
+        # optional 1→3 channel repeat for Inception
+        if rgb_repeat and gen_batch.shape[1] == 1:
+            gen_batch = gen_batch.repeat_interleave(3, dim=1)
+
+        for metric in fid_metrics.values():
+            metric.update(gen_batch, (start, real_sz))
 
         if c_out_hist is not None:
-            c_out_hist.update(batch_gen, (start_idx, real_size))
+            c_out_hist.update(gen_batch, (start, real_sz))
 
-        start_idx += batch_z.size(0)
+        start += real_sz
 
-    for metric_name, metric in fid_metrics.items():
-        result = metric.finalize()
-        stats_logger.update_epoch_metric(metric_name, result, prnt=True)
+    # log results
+    for name, metric in fid_metrics.items():
+        value = metric.finalize()
+        stats_logger.update_epoch_metric(name, value, prnt=True)
         metric.reset()
 
     if c_out_hist is not None:
         c_out_hist.plot()
-        # stats_logger.log_plot('histogram') # why do we have this error??
         c_out_hist.reset()
         plt.clf()
 
-    if training:
+    if was_training:
         G.train()
 
 
-def train_disc(G, D, d_opt, d_crit, real_data,
-               batch_size, train_metrics, device):
+# ────────────────────────────────────────────────────────────────
+# 1-step of discriminator update
+# ────────────────────────────────────────────────────────────────
+def train_disc(
+    G,
+    D,
+    d_opt,
+    d_crit,
+    real_data: torch.Tensor,
+    batch_size: int,
+    train_metrics: MetricsLogger,
+    device: torch.device,
+):
     D.zero_grad()
 
-    # Real data batch
+    # real pass
     real_data = real_data.to(device)
-    d_output_real = D(real_data)
+    d_real = D(real_data)
 
-    # Fake data batch
+    # fake pass
     noise = torch.randn(batch_size, G.z_dim, device=device)
     with torch.no_grad():
         fake_data = G(noise)
+    d_fake = D(fake_data.detach())
 
-    d_output_fake = D(fake_data.detach())
-
-    # Compute loss, gradients and update net
-    d_loss, d_loss_terms = d_crit(real_data, fake_data,
-                                  d_output_real, d_output_fake, device)
-    torch.autograd.set_detect_anomaly(True)
-
+    # loss + update
+    d_loss, d_terms = d_crit(real_data, fake_data, d_real, d_fake, device)
     d_loss.backward()
     d_opt.step()
 
-    for loss_term_name, loss_term_value in d_loss_terms.items():
-        train_metrics.update_it_metric(loss_term_name, loss_term_value)
+    for k, v in d_terms.items():
+        train_metrics.update_it_metric(k, v)
+    train_metrics.update_it_metric("D_loss", d_loss.item())
 
-    train_metrics.update_it_metric('D_loss', d_loss.item())
-
-    return d_loss, d_loss_terms
+    return d_loss, d_terms
 
 
-def train_gen(update_fn, G, D, g_opt,
-              batch_size, train_metrics, device):
+# ────────────────────────────────────────────────────────────────
+# 1-step of generator update
+# ────────────────────────────────────────────────────────────────
+def train_gen(
+    update_fn,
+    G,
+    D,
+    g_opt,
+    batch_size: int,
+    train_metrics: MetricsLogger,
+    device: torch.device,
+):
     noise = torch.randn(batch_size, G.z_dim, device=device)
+    g_loss, g_terms = update_fn(G, D, g_opt, noise, device)
 
-    g_loss, g_loss_terms = update_fn(G, D, g_opt, noise, device)
+    for k, v in g_terms.items():
+        train_metrics.update_it_metric(k, v)
+    train_metrics.update_it_metric("G_loss", g_loss.item())
 
-    for loss_term_name, loss_term_value in g_loss_terms.items():
-        train_metrics.update_it_metric(loss_term_name, loss_term_value)
-
-    train_metrics.update_it_metric('G_loss', g_loss.item())
-
-    return g_loss, g_loss_terms
+    return g_loss, g_terms
 
 
-def train(config, dataset, device, n_epochs, batch_size, G, g_opt, g_updater, D,
-          d_opt, d_crit, test_noise, fid_metrics, n_disc_iters,
-          early_stop=None,  # Tuple of (key, crit)
-          start_early_stop_when=None,  # Tuple of (key, crit):
-          checkpoint_dir=None, checkpoint_every=10, fixed_noise=None, c_out_hist=None,
-          classifier=None):
+# ────────────────────────────────────────────────────────────────
+# full training loop (step-1 / vanilla GAN)
+# ────────────────────────────────────────────────────────────────
+def train(
+    config: dict,
+    dataset,
+    device: torch.device,
+    n_epochs: int,
+    batch_size: int,
+    G,
+    g_opt,
+    g_updater,
+    D,
+    d_opt,
+    d_crit,
+    test_noise: torch.Tensor,
+    fid_metrics: dict[str, object],
+    n_disc_iters: int,
+    *,
+    early_stop: tuple[str, int] | None = None,
+    start_early_stop_when: tuple[str, int] | None = None,
+    checkpoint_dir: str | None = None,
+    checkpoint_every: int = 10,
+    fixed_noise: torch.Tensor | None = None,
+    c_out_hist=None,
+    classifier=None,
+):
+    # fixed Z for visuals
+    fixed_noise = (
+        torch.randn(64, G.z_dim, device=device)
+        if fixed_noise is None
+        else fixed_noise
+    )
 
-    fixed_noise = torch.randn(
-        64, G.z_dim, device=device) if fixed_noise is None else fixed_noise
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=True,
+        num_workers=config["num-workers"],
+        worker_init_fn=seed_worker,
+    )
 
-    dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=batch_size, shuffle=True, drop_last=True,
-        num_workers=config["num-workers"], worker_init_fn=seed_worker)
+    tr_log, ev_log = MetricsLogger("train"), MetricsLogger("eval")
+    tr_log.add("G_loss", True)
+    tr_log.add("D_loss", True)
+    for t in g_updater.get_loss_terms() + d_crit.get_loss_terms():
+        tr_log.add(t, True)
+    for m in fid_metrics:
+        ev_log.add(m)
+    ev_log.add_media_metric("samples")
+    ev_log.add_media_metric("histogram")
 
-    train_metrics = MetricsLogger(prefix='train')
-    eval_metrics = MetricsLogger(prefix='eval')
-
-    train_state = {
-        'epoch': 0,
-        'early_stop_tracker': 0,
-        'best_epoch': 0,
-        'best_epoch_metric': float('inf'),
-    }
-
-    early_stop_state = 2
-    if early_stop[1] is not None:
-        early_stop_key, early_stop_crit = early_stop
-        early_stop_state = 1
-        if start_early_stop_when is not None:
-            train_state['pre_early_stop_tracker'] = 0,
-            train_state['pre_early_stop_metric'] = float('inf')
-            pre_early_stop_key, pre_early_stop_crit = start_early_stop_when
-            early_stop_state = 0
-
-    train_metrics.add('G_loss', iteration_metric=True)
-    train_metrics.add('D_loss', iteration_metric=True)
-
-    for loss_term in g_updater.get_loss_terms():
-        train_metrics.add(loss_term, iteration_metric=True)
-
-    for loss_term in d_crit.get_loss_terms():
-        train_metrics.add(loss_term, iteration_metric=True)
-
-    for metric_name in fid_metrics.keys():
-        eval_metrics.add(metric_name)
-
-    eval_metrics.add_media_metric('samples')
-    eval_metrics.add_media_metric('histogram')
-
+    # -------- initial snapshot ------------------------------------
     with torch.no_grad():
         G.eval()
-        fake = G(fixed_noise).detach().cpu()
+        first_fake = G(fixed_noise).cpu()
         G.train()
+    img0 = group_images(first_fake, classifier, device)
+    if checkpoint_dir is not None:
+        checkpoint_image(img0, 0, checkpoint_dir)
+        checkpoint_gan(G, D, g_opt, d_opt, {}, {}, config,
+                       epoch=0, output_dir=checkpoint_dir)
 
-    latest_cp = checkpoint_gan(
-        G, D, g_opt, d_opt, {}, {}, config, epoch=0, output_dir=checkpoint_dir)
-    best_cp = latest_cp
+    # -------- training loop ---------------------------------------
+    iters_per_epoch = (len(loader) // n_disc_iters) * n_disc_iters
+    log_every_g = 50
 
-    img = group_images(fake, classifier=classifier, device=device)
-    checkpoint_image(img, 0, output_dir=checkpoint_dir)
+    for epoch in range(1, n_epochs + 1):
+        it_loader = iter(loader)
+        g_it = 0
 
-    G.train()
-    D.train()
+        for i in range(1, iters_per_epoch + 1):
+            real, _ = next(it_loader)
+            train_disc(
+                G, D, d_opt, d_crit, real, batch_size, tr_log, device
+            )
 
-    g_iters_per_epoch = int(math.floor(len(dataloader) / n_disc_iters))
-    iters_per_epoch = g_iters_per_epoch * n_disc_iters
-
-    log_every_g_iter = 50
-
-    print("Training...")
-    for epoch in range(1, n_epochs+1):
-        data_iter = iter(dataloader)
-        curr_g_iter = 0
-
-        for i in range(1, iters_per_epoch+1):
-            data, _ = next(data_iter)
-            real_data = data.to(device)
-
-            ###
-            # Update Discriminator
-            ###
-            d_loss, d_loss_terms = train_disc(
-                G, D, d_opt, d_crit, real_data, batch_size, train_metrics, device)
-
-            ###
-            # Update Generator
-            # - update every 'n_disc_iterators' consecutive D updates
-            ###
             if i % n_disc_iters == 0:
-                curr_g_iter += 1
+                g_it += 1
+                train_gen(g_updater, G, D, g_opt,
+                          batch_size, tr_log, device)
 
-                g_loss, g_loss_terms = train_gen(g_updater,
-                    G, D, g_opt, batch_size, train_metrics, device)
+                if g_it % log_every_g == 0 or g_it == iters_per_epoch // n_disc_iters:
+                    print(f"[{epoch}/{n_epochs}] g_it {g_it}/{iters_per_epoch//n_disc_iters} "
+                          f"G {tr_log.last('G_loss'):.3f} | D {tr_log.last('D_loss'):.3f}")
 
-                ###
-                # Log stats
-                ###
-                if curr_g_iter % log_every_g_iter == 0 or \
-                        curr_g_iter == g_iters_per_epoch:
-                    print('[%d/%d][%d/%d]\tG loss: %.4f %s; D loss: %.4f %s'
-                          % (epoch, n_epochs, curr_g_iter, g_iters_per_epoch, g_loss.item(), loss_terms_to_str(g_loss_terms), d_loss.item(),
-                             loss_terms_to_str(d_loss_terms)))
-
-        ###
-        # Sample images
-        ###
+        # ---------- epoch end: images & metrics -------------------
         with torch.no_grad():
             G.eval()
-            fake = G(fixed_noise).detach().cpu()
+            fake = G(fixed_noise).cpu()
             G.train()
+        img = group_images(fake, classifier, device)
+        ev_log.log_image("samples", img)
+        if checkpoint_dir is not None:
+            checkpoint_image(img, epoch, checkpoint_dir)
 
-        img = group_images(fake, classifier=classifier, device=device)
-        checkpoint_image(img, epoch, output_dir=checkpoint_dir)
-        eval_metrics.log_image('samples', img)
+        tr_log.finalize_epoch()
+        evaluate(G, fid_metrics, ev_log,
+                 batch_size, test_noise, device, c_out_hist)
+        ev_log.finalize_epoch()
 
-        ###
-        # Evaluate after epoch
-        ###
-        train_state['epoch'] += 1
+        if checkpoint_dir and (epoch % checkpoint_every == 0 or epoch == n_epochs):
+            checkpoint_gan(G, D, g_opt, d_opt, None,
+                           {"eval": ev_log.stats, "train": tr_log.stats},
+                           config, epoch, checkpoint_dir)
 
-        train_metrics.finalize_epoch()
 
-        evaluate(G, fid_metrics, eval_metrics, batch_size,
-                 test_noise, device, c_out_hist)
+# ======================================================================
+#  Back-compatibility re-exports
+# ======================================================================
 
-        if c_out_hist is not None:
-            img = c_out_hist.plot_clfs()
-            if img is not None:
-                checkpoint_image(img, epoch, output_dir=checkpoint_dir)
-                eval_metrics.log_image('histogram', img)
+__all__ = ["train_disc", "train_gen", "evaluate"]
 
-        eval_metrics.finalize_epoch()
-
-        ###
-        # Checkpoint GAN
-        ###
-        if epoch == n_epochs or epoch % checkpoint_every == 0:
-            latest_cp = checkpoint_gan(
-                G, D, g_opt, d_opt, train_state, {"eval": eval_metrics.stats, "train": train_metrics.stats}, config, epoch=epoch, output_dir=checkpoint_dir)
-
-        ###
-        # Test for early stopping
-        ###
-        if early_stop_state == 2:
-            best_cp = latest_cp
-        elif early_stop_state == 0:
-            # Pre early stop phase
-            if eval_metrics.stats[pre_early_stop_key][-1] \
-                    < train_state['pre_early_stop_metric']:
-                train_state['pre_early_stop_tracker'] = 0
-                train_state['pre_early_stop_metric'] = \
-                    eval_metrics.stats[pre_early_stop_key][-1]
-            else:
-                train_state['pre_early_stop_tracker'] += 1
-                print(
-                    " > Pre-early stop tracker {}/{}".format(train_state['pre_early_stop_tracker'], pre_early_stop_crit))
-                if train_state['pre_early_stop_tracker'] \
-                        == pre_early_stop_crit:
-                    early_stop_state = 1
-
-            best_cp = latest_cp
-        else:
-            # Early stop phase
-            if eval_metrics.stats[early_stop_key][-1] < train_state['best_epoch_metric']:
-                train_state['early_stop_tracker'] = 0
-                train_state['best_epoch'] = epoch + 1
-                train_state['best_epoch_metric'] = eval_metrics.stats[
-                    early_stop_key][-1]
-                best_cp = latest_cp
-            else:
-                train_state['early_stop_tracker'] += 1
-                print(
-                    " > Early stop tracker {}/{}".format(train_state['early_stop_tracker'], early_stop_crit))
-                if train_state['early_stop_tracker'] == early_stop_crit:
-                    break
-
-    return train_state, best_cp, train_metrics, eval_metrics
+globals().update(
+    {name: globals()[name] for name in __all__}
+)
