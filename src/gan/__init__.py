@@ -59,17 +59,16 @@ def construct_gan(config, img_size, device):
                   is_critic=is_critic).to(device)
 
     elif arch["name"] == "stl10_sagan":
-        G = SA_G(img_size, z_dim=config["z_dim"],
+        G = SA_G(img_size=img_size, z_dim=config["z_dim"],
                  filter_dim=arch["g_filter_dim"],
                  n_blocks=arch["g_num_blocks"]).to(device)
-        D = SA_D(img_size,
+        D = SA_D(img_size=img_size,
                  filter_dim=arch["d_filter_dim"],
                  n_blocks=arch["d_num_blocks"],
                  is_critic=is_critic).to(device)
 
-    # ───── NEW: CIFAR-10 SAGAN (32×32) ─────
     elif arch["name"] == "cifar10_sagan":
-        G = CF_G(img_size, z_dim=config["z_dim"],
+        G = CF_G(img_size = img_size, z_dim=config["z_dim"],
                  filter_dim=arch["g_filter_dim"],
                  n_blocks=arch["g_num_blocks"]).to(device)
         D = CF_D(img_size,
