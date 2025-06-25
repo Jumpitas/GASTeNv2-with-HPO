@@ -16,7 +16,7 @@ class Mapping(nn.Sequential):
     def __init__(self, z_dim=128, w_dim=512, layers=8):
         mods = []
         for i in range(layers):
-            mods += [nn.Linear(z_dim if i==0 else w_dim, w_dim), nn.LeakyReLU(0.2)]
+            mods += [nn.Linear(z_dim if i == 0 else w_dim, w_dim), nn.LeakyReLU(0.2)]
         super().__init__(*mods)
         self.apply(he)
     def forward(self, z): return pixel_norm(super().forward(z))
@@ -30,36 +30,36 @@ class ModConv(nn.Module):
     def forward(self, x, w):
         b,c,h,w_ = x.shape
         style = self.affine(w).view(b,1,c,1,1) + 1
-        wgt   = self.weight[None]*style
+        wgt   = self.weight[None] * style
         if self.demod:
-            d = torch.rsqrt((wgt**2).sum([2,3,4])+1e-8)
+            d = torch.rsqrt((wgt**2).sum([2,3,4]) + 1e-8)
             wgt = wgt * d.view(b,-1,1,1,1)
-        x = x.view(1,-1,h,w_)
-        wgt = wgt.view(-1,c,self.weight.size(2),self.weight.size(3))
-        x = F.conv2d(x, wgt, padding=self.pad, groups=b)
-        return x.view(b,-1,h,w_)
+        x   = x.view(1, -1, h, w_)
+        wgt = wgt.view(-1, c, self.weight.size(2), self.weight.size(3))
+        out = F.conv2d(x, wgt, padding=self.pad, groups=b)
+        return out.view(b, -1, h, w_)
 
 class GBlock(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
-        self.up  = nn.Upsample(2, "nearest")
+        self.up  = nn.Upsample(scale_factor=2, mode="nearest")
         self.c1  = ModConv(in_ch,  out_ch)
         self.c2  = ModConv(out_ch, out_ch)
-        self.n1  = nn.Parameter(torch.zeros(1,out_ch,1,1))
-        self.n2  = nn.Parameter(torch.zeros(1,out_ch,1,1))
+        self.n1  = nn.Parameter(torch.zeros(1, out_ch, 1, 1))
+        self.n2  = nn.Parameter(torch.zeros(1, out_ch, 1, 1))
         self.act = nn.LeakyReLU(0.2)
     def forward(self,x,w):
         x = self.up(x)
-        x = self.act(self.c1(x,w) + self.n1*torch.randn_like(x))
-        x = self.act(self.c2(x,w) + self.n2*torch.randn_like(x))
+        x = self.act(self.c1(x,w) + self.n1 * torch.randn_like(x))
+        x = self.act(self.c2(x,w) + self.n2 * torch.randn_like(x))
         return x
 
 class DBlock(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
-        self.c1   = spectral_norm(nn.Conv2d(in_ch, out_ch, 3,1,1))
-        self.c2   = spectral_norm(nn.Conv2d(out_ch,out_ch,3,1,1))
-        self.skip = spectral_norm(nn.Conv2d(in_ch, out_ch,1))
+        self.c1   = spectral_norm(nn.Conv2d(in_ch,  out_ch, 3,1,1))
+        self.c2   = spectral_norm(nn.Conv2d(out_ch, out_ch, 3,1,1))
+        self.skip = spectral_norm(nn.Conv2d(in_ch,  out_ch, 1))
         self.pool = nn.AvgPool2d(2)
         self.act  = nn.LeakyReLU(0.2)
     def forward(self,x):
@@ -74,10 +74,10 @@ class Generator(nn.Module):
         self.n_blocks = min(n_blocks, max_b)
         init_h  = h // (2**self.n_blocks)
         init_ch = fmap * (2**self.n_blocks)
-        self.z_dim  = z_dim
-        self.mapping= Mapping(z_dim)
-        self.const  = nn.Parameter(torch.randn(1, init_ch, init_h, init_h))
-        self.ups    = nn.Upsample(2, "nearest")
+        self.z_dim   = z_dim
+        self.mapping = Mapping(z_dim)
+        self.const   = nn.Parameter(torch.randn(1, init_ch, init_h, init_h))
+        self.ups     = nn.Upsample(scale_factor=2, mode="nearest")
 
         in_ch = init_ch
         self.blocks = nn.ModuleList()
@@ -85,16 +85,16 @@ class Generator(nn.Module):
         for _ in range(self.n_blocks):
             out_ch = max(fmap, in_ch//2)
             self.blocks.append(GBlock(in_ch, out_ch))
-            self.torgb.append(ModConv(out_ch, c,1,demod=False))
+            self.torgb.append(ModConv(out_ch, c, 1, demod=False))
             in_ch = out_ch
         self.tanh = nn.Tanh()
         self.apply(he)
 
     def forward(self,z):
         w = self.mapping(z)
-        x = self.const.expand(z.size(0),-1,-1,-1)
+        x = self.const.expand(z.size(0), -1, -1, -1)
         rgb = None
-        for blk,tor in zip(self.blocks,self.torgb):
+        for blk, tor in zip(self.blocks, self.torgb):
             x   = blk(x,w)
             rgb = tor(x,w) if rgb is None else self.ups(rgb) + tor(x,w)
         return self.tanh(rgb)
@@ -112,8 +112,8 @@ class Discriminator(nn.Module):
             out_ch = min(fmap*16, in_ch*2)
             layers.append(DBlock(in_ch, out_ch))
             in_ch = out_ch
-            res //= 2
-        res = max(res,1)
+            res  //= 2
+        res = max(res, 1)
         self.features = nn.Sequential(*layers)
         self.final_fc = spectral_norm(nn.Linear(in_ch*res*res, 1))
         self.out_act  = nn.Identity() if is_critic else nn.Sigmoid()
