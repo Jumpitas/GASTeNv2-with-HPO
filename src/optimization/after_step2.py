@@ -1,169 +1,134 @@
-import argparse
-import os
-import random
+#!/usr/bin/env python3
+import argparse, json, math, statistics
 from pathlib import Path
-from typing import Dict, Tuple
 
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.transforms as T
-from PIL import Image
-from captum.attr import GradientShap
-from sklearn.mixture import GaussianMixture
-from sklearn.metrics import silhouette_score, davies_bouldin_score
-import umap.umap_ as umap
+from torchvision.utils import save_image
+from tqdm import tqdm
 
-from src.data_loaders import load_dataset
+from src.gan import construct_gan
+from src.classifier import construct_classifier
 from src.utils.checkpoint import construct_classifier_from_checkpoint
 
-# -----------------------------------------------------------------------------
-# Dataset config
-# -----------------------------------------------------------------------------
-# `shape` is (C, H, W) – matches what load_clf() expects.
-# Tile size is derived from the last two entries (H, W).
-
-DATASET_INFO: Dict[str, Dict[str, Tuple]] = {
-    "mnist":         {"shape": (1, 28, 28),  "mean": (0.5,),               "std": (0.5,)},
-    "fashion-mnist": {"shape": (1, 28, 28),  "mean": (0.5,),               "std": (0.5,)},
-    "cifar10":       {"shape": (3, 32, 32),  "mean": (0.485, 0.456, 0.406), "std": (0.229, 0.224, 0.225)},
-    "stl10":         {"shape": (3, 96, 96),  "mean": (0.5, 0.5, 0.5),       "std": (0.5, 0.5, 0.5)},
-    "chestxray":     {"shape": (1, 224, 224),"mean": (0.5,),               "std": (0.5,)},
-    "imagenet":      {"shape": (3, 224,224), "mean": (0.485, 0.456, 0.406), "std": (0.229, 0.224, 0.225)},
+DATASET_SPECS = {
+    "cifar10":       (3, 32, 32),
+    "cifar100":      (3, 32, 32),
+    "stl10":         (3, 96, 96),
+    "imagenet":      (3, 224, 224),
+    "fashion-mnist": (1, 28, 28),
+    "mnist":         (1, 28, 28),
+    "chest-xray":    (3, 128, 128),
 }
 
-BATCH_SIZE = 128
-MARGIN_THR = 0.1
-RNG        = 0
-
-# -----------------------------------------------------------------------------
-# CLI
-# -----------------------------------------------------------------------------
-
-def parse_args():
-    p = argparse.ArgumentParser(description="Sprite → UMAP+GMM → prototypes")
-    p.add_argument("sprite", help="Sprite PNG (tiled thumbnails)")
-    p.add_argument("--checkpoint", "-c", required=True, help="Classifier checkpoint directory")
-    p.add_argument("--dataset", "-d", choices=list(DATASET_INFO), default="fashion-mnist")
-    p.add_argument("--samples", "-n", type=int, default=200)
-    p.add_argument("--clusters", "-k", type=int, default=8)
-    p.add_argument("--out", "-o", default="step2_outputs")
-    return p.parse_args()
-
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
-
-def extract_embeddings(model: nn.Module, data: torch.Tensor, device: torch.device) -> np.ndarray:
-    layers = [m for m in model.modules() if isinstance(m, nn.Linear)]
-    feat_layer = layers[-2] if len(layers) >= 2 else [m for m in model.modules() if isinstance(m, nn.Conv2d)][-1]
-    feats = []
-    def _hook(_, __, out):
-        feats.append(out.detach().cpu().reshape(out.size(0), -1).numpy())
-    h = feat_layer.register_forward_hook(_hook)
-    model.eval()
-    with torch.no_grad():
-        for batch in torch.split(data.to(device), BATCH_SIZE):
-            _ = model(batch)
-    h.remove()
-    return np.vstack(feats)
+# ----------------------------------------------------------------------
+def find_config_dir(start: Path) -> Path:
+    for p in (start, *start.parents):
+        if (p / "config.json").is_file():
+            return p
+    raise FileNotFoundError("config.json not found")
 
 
-def plot_umap(Z: np.ndarray, idxs: list[int], out_dir: Path, name: str):
-    plt.figure(figsize=(6, 6))
-    plt.scatter(Z[:, 0], Z[:, 1], c="gray", s=15, alpha=0.3)
-    plt.scatter(Z[idxs, 0], Z[idxs, 1], c="red", marker="x", s=100)
-    plt.tight_layout()
-    plt.savefig(out_dir / f"umap_{name}.png", dpi=150)
-    plt.close()
+# ----------------------------------------------------------------------
+# ← UPDATED FUNCTION
+def load_generator(gen_dir: Path, dataset: str, device: torch.device):
+    ckpt = torch.load(gen_dir / "generator.pth", map_location=device)
+
+    # 1) Prefer hyper-params saved in the checkpoint itself
+    if "meta" in ckpt and "model_args" in ckpt["meta"]:
+        g_args = ckpt["meta"]["model_args"]
+        img_sz = tuple(g_args.get("img_size", DATASET_SPECS[dataset]))
+    else:
+        # Fallback: read experiment-level config.json
+        cfg_dir = find_config_dir(gen_dir)
+        exp_cfg = json.loads((cfg_dir / "config.json").read_text())
+        g_args  = exp_cfg["model"]
+        img_sz  = tuple(g_args.get("img_size", DATASET_SPECS[dataset]))
+
+    # 2) Rebuild generator exactly as trained
+    G, _ = construct_gan(g_args, img_sz, device)[:2]
+
+    # 3) Strictly load weights – shapes now match
+    G.load_state_dict(ckpt.get("state", ckpt), strict=True)
+    return G.eval()
 
 
-def save_heatmaps(protos: torch.Tensor, clf: nn.Module, device: torch.device, out_dir: Path, c_in: int):
-    gs = GradientShap(clf)
-    base = torch.full_like(protos, -1.0).to(device)
-    for i, x in enumerate(protos):
-        x = x.unsqueeze(0).to(device)
-        attr = gs.attribute(x, baselines=base[i:i+1], target=1, n_samples=50)
-        A   = attr.squeeze(0).cpu().numpy()
-        M   = np.abs(A.mean(0)).max() + 1e-8
-        img = x.squeeze(0).cpu().permute(1,2,0).numpy()
-        H,W = img.shape[:2]
-        fig, ax = plt.subplots(figsize=(W/100, H/100), dpi=100)
-        ax.axis("off")
-        ax.imshow(img[:,:,0] if c_in==1 else img, cmap=None, interpolation="nearest")
-        ax.imshow(A.mean(0), cmap="bwr", vmin=-M, vmax=M, alpha=0.6)
-        fig.savefig(out_dir/f"proto_{i:02d}_heatmap.png", bbox_inches="tight", pad_inches=0)
-        plt.close(fig)
+# ----------------------------------------------------------------------
+def load_classifier(clf_dir: Path, dataset: str, device: torch.device):
+    try:
+        cfg_dir = find_config_dir(clf_dir)
+        C, *_   = construct_classifier_from_checkpoint(str(cfg_dir), device)
+        return C.eval()
+    except FileNotFoundError:
+        C_, H, W = DATASET_SPECS[dataset]
+        params = {"type": "mlp", "n_classes": 2,
+                  "img_size": (C_, H, W), "hidden_dim": 512}
+        C = construct_classifier(params, device)
+        ckpt = torch.load(clf_dir / "classifier.pth", map_location=device)
+        C.load_state_dict(ckpt.get("state_dict", ckpt), strict=False)
+        return C.eval()
 
-# -----------------------------------------------------------------------------
-# Main
-# -----------------------------------------------------------------------------
 
+# ----------------------------------------------------------------------
 def main():
-    args = parse_args()
-    cfg  = DATASET_INFO[args.dataset]
-    _, tile_h, tile_w = cfg["shape"]
+    p = argparse.ArgumentParser(
+        description="Generate & sort images by ACD = |p_pos−0.5|"
+    )
+    p.add_argument("gen_dir")
+    p.add_argument("clf_dir")
+    p.add_argument("--dataset", required=True, choices=DATASET_SPECS)
+    p.add_argument("--num",   type=int, default=10_000)
+    p.add_argument("--batch", type=int, default=64)
+    p.add_argument("--cols",  type=int, default=100)
+    p.add_argument("--out",   default="sheet.png")
+    p.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    args = p.parse_args()
 
-    device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
+    device  = torch.device(args.device)
+    gen_dir = Path(args.gen_dir)
+    clf_dir = Path(args.clf_dir)
 
-    clf, *_ = construct_classifier_from_checkpoint(args.checkpoint, device=device)
-    c_in    = next(clf.parameters()).shape[1]
+    print("Loading generator …")
+    G = load_generator(gen_dir, args.dataset, device)
+    print("Loading classifier …")
+    C = load_classifier(clf_dir, args.dataset, device)
 
-    ds, _, _ = load_dataset(args.dataset, os.getenv("FILESDIR", "./data"), pos=None, neg=None, split="test")
-    X_test   = torch.stack([ds[i][0] for i in range(len(ds))])
+    z_dim = getattr(G, "z_dim", 128)
+    zs    = torch.randn(args.num, z_dim, device=device)
 
-    mode  = "RGB" if c_in==3 else "L"
-    sheet = Image.open(args.sprite).convert(mode)
-    W,H   = sheet.size
-    cols, rows = W//tile_w, H//tile_h
-    assert cols*tile_w==W and rows*tile_h==H, "sprite mismatch"
+    imgs = []
+    for i in tqdm(range(0, args.num, args.batch), desc="Generating"):
+        with torch.no_grad():
+            out = G(zs[i:i+args.batch]).clamp(-1, 1).add(1).div(2).cpu()
+        imgs.append(out)
+    imgs = torch.cat(imgs)[: args.num]
 
-    tfm = T.Compose([T.ToTensor(), T.Normalize(cfg["mean"], cfg["std"])])
-    tiles=[tfm(sheet.crop((c*tile_w, r*tile_h, (c+1)*tile_w, (r+1)*tile_h)))
-           for r in range(rows) for c in range(cols)]
-    all_imgs = torch.stack(tiles)
+    scored, acds = [], []
+    for img in tqdm(imgs, desc="Scoring"):
+        with torch.no_grad():
+            p_pos = torch.softmax(C(img.unsqueeze(0).to(device)), -1)[0, 1].item()
+        acd = abs(p_pos - 0.5)
+        acds.append(acd)
+        scored.append((acd, img))
 
-    probs=[]; clf.eval()
-    with torch.no_grad():
-        for b in torch.split(all_imgs,BATCH_SIZE):
-            out = clf(b.to(device))
-            p = torch.sigmoid(out) if out.dim()==1 or out.shape[1]==1 else F.softmax(out,1)[:,1]
-            probs.append(p.cpu())
-    probs   = torch.cat(probs)
-    margins = (probs-0.5).abs()
-    mask    = margins < MARGIN_THR
-    border_all = all_imgs[mask]
-    if not len(border_all):
-        raise RuntimeError("No borderline samples; increase margin.")
-    idx     = torch.argsort(margins[mask])[:args.samples]
-    border  = border_all[idx].to(device)
+    print(f"ACD mean {statistics.mean(acds):.4f} | "
+          f"median {statistics.median(acds):.4f} | "
+          f"<0.1 {(sum(a < 0.1 for a in acds)*100/len(acds)):.1f}%")
 
-    E_border = extract_embeddings(clf, border, device)
-    E_test   = extract_embeddings(clf, X_test, device)
-    reducer  = umap.UMAP(15,0.1,2,RNG)
-    Z_all    = reducer.fit_transform(np.vstack([E_test,E_border]))
-    Z_border = Z_all[len(E_test):]
+    scored.sort(key=lambda t: t[0])
+    sorted_imgs = [img for _, img in scored]
 
-    gmm   = GaussianMixture(args.clusters, covariance_type="full", init_params="random", random_state=RNG)
-    labs  = gmm.fit_predict(Z_border)
+    rows = math.ceil(args.num / args.cols)
+    pad  = rows * args.cols - args.num
+    if pad:
+        sorted_imgs += [torch.zeros_like(sorted_imgs[0])] * pad
 
-    prot_idx=[]
-    for c in range(args.clusters):
-        cls=np.where(labs==c)[0]
-        if not len(cls):
-            continue
-        D = np.linalg.norm(E_border[cls][:,None]-E_border[cls][None],axis=-1)
-        prot_idx.append(int(cls[D.sum(1).argmin()]))
+    cols = [torch.cat(sorted_imgs[c*rows:(c+1)*rows], 1) for c in range(args.cols)]
+    sheet = torch.cat(cols, 2)
 
-    base_idx = random.sample(range(len(Z_border)), len(prot_idx))
-    plot_umap(Z_border, base_idx, out_dir, "baseline")
-    plot_umap(Z_border, prot_idx, out_dir, "prototypes")
+    out_path = Path(args.out).with_suffix(".png")
+    save_image(sheet, str(out_path))
+    print("Saved", out_path)
 
-    save_heatmaps(border[prot_idx], clf, device, out_dir, c_in)
-    print("done", out_dir.resolve())
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
