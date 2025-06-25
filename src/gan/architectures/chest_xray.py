@@ -90,6 +90,17 @@ class DBlock(nn.Module):
     def forward(self, x):
         y = self.pool(self.act(self.c2(self.act(self.c1(x)))))
         return y + self.pool(self.skip(x))
+class DBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.c1   = spectral_norm(nn.Conv2d(in_ch, out_ch, 3,1,1))
+        self.c2   = spectral_norm(nn.Conv2d(out_ch,out_ch, 3,1,1))
+        self.skip = spectral_norm(nn.Conv2d(in_ch, out_ch,1))
+        self.pool = nn.AvgPool2d(2)
+        self.act  = nn.LeakyReLU(.2)
+    def forward(self, x):
+        y = self.pool(self.act(self.c2(self.act(self.c1(x)))))
+        return y + self.pool(self.skip(x))
 
 # ───────── Generator ─────────
 class Generator(nn.Module):
