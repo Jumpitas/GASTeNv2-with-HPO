@@ -31,7 +31,7 @@ def load_generator(gen_dir: Path, dataset: str, device: torch.device):
     cfg      = json.loads((cfg_dir / "config.json").read_text())
     img_size = DATASET_SPECS[dataset]
     G, _     = construct_gan(cfg["model"], img_size, device)[:2]
-    ckpt     = torch.load(gen_dir / "generator.pth", map_location=device)
+    ckpt     = torch.load(gen_dir / "generator.pth", map_location=device, weights_only=False)
     state    = ckpt.get("state", ckpt)
     G.load_state_dict(state)
     return G.eval()
@@ -50,7 +50,7 @@ def load_classifier(clf_dir: Path, dataset: str, device: torch.device):
             "hidden_dim": 512
         }
         C = construct_classifier(params, device)
-        ckpt = torch.load(clf_dir / "classifier.pth", map_location=device)
+        ckpt = torch.load(clf_dir / "classifier.pth", map_location=device, weights_only=False)
         sd   = ckpt.get("state_dict", ckpt)
         C.load_state_dict(sd, strict=False)
         return C.eval()
