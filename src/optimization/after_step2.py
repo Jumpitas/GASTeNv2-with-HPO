@@ -17,23 +17,22 @@ DATASET_SPECS = {
     "imagenet":      (3, 224, 224),
     "fashion-mnist": (1, 28, 28),
     "mnist":         (1, 28, 28),
-    "chest-xray":    (1, 128, 128),
+    "chest-xray":    (3, 128, 128),   # RGB for generator checkpoints
 }
 
 def find_config_dir(start: Path) -> Path:
     for p in (start, *start.parents):
         if (p / "config.json").is_file():
             return p
-    raise FileNotFoundError(f"config.json not found under {start} or its parents")
+    raise FileNotFoundError("config.json not found")
 
 def load_generator(gen_dir: Path, dataset: str, device: torch.device):
-    cfg_dir  = find_config_dir(gen_dir)
-    cfg      = json.loads((cfg_dir / "config.json").read_text())
-    img_size = DATASET_SPECS[dataset]
-    G, _     = construct_gan(cfg["model"], img_size, device)[:2]
-    ckpt     = torch.load(gen_dir / "generator.pth", map_location=device, weights_only=False)
-    state    = ckpt.get("state", ckpt)
-    G.load_state_dict(state)
+    cfg_dir = find_config_dir(gen_dir)
+    cfg     = json.loads((cfg_dir / "config.json").read_text())
+    img_sz  = tuple(cfg["model"].get("img_size", DATASET_SPECS[dataset]))
+    G, _    = construct_gan(cfg["model"], img_sz, device)[:2]
+    ckpt    = torch.load(gen_dir / "generator.pth", map_location=device)
+    G.load_state_dict(ckpt.get("state", ckpt))
     return G.eval()
 
 def load_classifier(clf_dir: Path, dataset: str, device: torch.device):
@@ -43,104 +42,74 @@ def load_classifier(clf_dir: Path, dataset: str, device: torch.device):
         return C.eval()
     except FileNotFoundError:
         C_, H, W = DATASET_SPECS[dataset]
-        params = {
-            "type": "mlp",
-            "n_classes": 2,
-            "img_size": (C_, H, W),
-            "hidden_dim": 512
-        }
+        params = {"type": "mlp", "n_classes": 2, "img_size": (C_, H, W),
+                  "hidden_dim": 512}
         C = construct_classifier(params, device)
-        ckpt = torch.load(clf_dir / "classifier.pth", map_location=device, weights_only=False)
-        sd   = ckpt.get("state_dict", ckpt)
-        C.load_state_dict(sd, strict=False)
+        ckpt = torch.load(clf_dir / "classifier.pth", map_location=device)
+        C.load_state_dict(ckpt.get("state_dict", ckpt), strict=False)
         return C.eval()
 
 def main():
     p = argparse.ArgumentParser(
-        description="Generate & sort images by ACD (|p_pos–0.5|) from a trained GAN"
+        description="Generate & sort images by ACD = |p_pos−0.5|"
     )
-    p.add_argument("gen_dir", help="Directory with generator.pth & config.json")
-    p.add_argument("clf_dir", help="Directory with classifier.pth (& config.json)")
-    p.add_argument("--dataset", required=True, choices=DATASET_SPECS.keys())
-    p.add_argument("--num",   type=int, default=10_000,
-                   help="Total number of images to generate")
-    p.add_argument("--batch", type=int, default=64,
-                   help="Batch size for generation")
-    p.add_argument("--cols",  type=int, default=100,
-                   help="Number of columns in final sheet")
-    p.add_argument("--out",   default="sheet.png",
-                   help="Output filename (will append .png if missing)")
+    p.add_argument("gen_dir")
+    p.add_argument("clf_dir")
+    p.add_argument("--dataset", required=True, choices=DATASET_SPECS)
+    p.add_argument("--num",   type=int, default=10_000)
+    p.add_argument("--batch", type=int, default=64)
+    p.add_argument("--cols",  type=int, default=100)
+    p.add_argument("--out",   default="sheet.png")
     p.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     args = p.parse_args()
 
-    device = torch.device(args.device)
+    device  = torch.device(args.device)
     gen_dir = Path(args.gen_dir)
     clf_dir = Path(args.clf_dir)
 
-    print("Loading generator…")
+    print("Loading generator …")
     G = load_generator(gen_dir, args.dataset, device)
-    print("Loading classifier…")
+    print("Loading classifier …")
     C = load_classifier(clf_dir, args.dataset, device)
 
-    # generate latents
     z_dim = getattr(G, "z_dim", 128)
-    zs = torch.randn(args.num, z_dim, device=device)
+    zs    = torch.randn(args.num, z_dim, device=device)
 
-    # forward through G
     imgs = []
     for i in tqdm(range(0, args.num, args.batch), desc="Generating"):
         with torch.no_grad():
-            batch = zs[i:i+args.batch]
-            out   = G(batch).cpu().clamp(-1,1).add(1).div(2)
+            out = G(zs[i:i+args.batch]).clamp(-1, 1).add(1).div(2).cpu()
         imgs.append(out)
-    imgs = torch.cat(imgs, 0)[: args.num]  # (N, C, H, W)
+    imgs = torch.cat(imgs)[: args.num]
 
-    # score and compute ACD = |p_pos - 0.5|
-    scored = []
-    acds = []
+    scored, acds = [], []
     for img in tqdm(imgs, desc="Scoring"):
         with torch.no_grad():
-            logits = C(img.unsqueeze(0).to(device))
-            probs  = torch.softmax(logits, dim=-1).cpu().squeeze(0)
-            p_pos  = float(probs[1])
+            p_pos = torch.softmax(C(img.unsqueeze(0).to(device)), -1)[0, 1].item()
         acd = abs(p_pos - 0.5)
         acds.append(acd)
         scored.append((acd, img))
 
-    # print stats
-    mean_acd   = statistics.mean(acds)
-    median_acd = statistics.median(acds)
-    frac_01    = sum(1 for a in acds if a < 0.1) / len(acds)
-    print(f"ACD stats: mean={mean_acd:.4f}, median={median_acd:.4f}, "
-          f"fraction(<0.1)={frac_01*100:.1f}%")
+    print(f"ACD mean {statistics.mean(acds):.4f} | "
+          f"median {statistics.median(acds):.4f} | "
+          f"<0.1 {(sum(a < 0.1 for a in acds)*100/len(acds)):.1f}%")
 
-    # sort by ACD ascending (closest to boundary first)
-    scored.sort(key=lambda x: x[0])
+    scored.sort(key=lambda t: t[0])
     sorted_imgs = [img for _, img in scored]
 
-    # pad to full grid
     rows = math.ceil(args.num / args.cols)
-    pad = rows * args.cols - args.num
-    if pad > 0:
+    pad  = rows * args.cols - args.num
+    if pad:
         blank = torch.zeros_like(sorted_imgs[0])
-        sorted_imgs += [blank]*pad
+        sorted_imgs += [blank] * pad
 
-    # build columns (vertical stacks)
-    cols = []
-    for c in range(args.cols):
-        start = c*rows
-        block = sorted_imgs[start:start+rows]
-        cols.append(torch.cat(block, dim=1))
-    # then build full sheet
-    sheet = torch.cat(cols, dim=2)
+    col_tensors = [torch.cat(sorted_imgs[c*rows:(c+1)*rows], dim=1)
+                   for c in range(args.cols)]
+    sheet = torch.cat(col_tensors, dim=2)
 
-    # ensure .png
-    out_path = Path(args.out)
-    if not out_path.suffix:
-        out_path = out_path.with_suffix(".png")
-
+    out_path = Path(args.out).with_suffix(".png")
     save_image(sheet, str(out_path))
-    print(f"Saved sheet to {out_path}")
+    print("Saved", out_path)
 
 if __name__ == "__main__":
     main()
