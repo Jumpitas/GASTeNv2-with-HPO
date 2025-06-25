@@ -17,34 +17,32 @@ DATASET_SPECS = {
     "imagenet":      (3, 224, 224),
     "fashion-mnist": (1, 28, 28),
     "mnist":         (1, 28, 28),
-    "chest-xray":    (3, 128, 128),   # generator checkpoints are RGB
+    "chest-xray":    (3, 128, 128),
 }
 
-# ----------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────
 def find_config_dir(start: Path) -> Path:
-    """Walk up the directory tree until we find a config.json."""
     for p in (start, *start.parents):
         if (p / "config.json").is_file():
             return p
     raise FileNotFoundError("config.json not found")
 
 
-# ----------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────
 def load_generator(gen_dir: Path, dataset: str, device: torch.device):
     """
-    Reconstruct the generator *exactly* as trained, using model_args saved
-    inside the checkpoint when available; fall back to the experiment-level
-    config.json otherwise.  If weight shapes still disagree, retry with
-    strict=False so the run can proceed (a warning is printed).
+    Reconstruct the generator exactly as trained, load weights safely:
+    • uses model_args saved in checkpoint (preferred) or experiment config.
+    • drops weights whose shapes don't match (handles 32/64-channel forks).
     """
     ckpt = torch.load(gen_dir / "generator.pth", map_location=device)
 
-    # 1) recover hyper-parameters
-    if ckpt.get("meta", {}).get("model_args"):               # wandb style
+    # 1) recover hyper-params
+    if ckpt.get("meta", {}).get("model_args"):
         g_args = ckpt["meta"]["model_args"]
-    elif ckpt.get("config", {}).get("model"):                # lightning style
+    elif ckpt.get("config", {}).get("model"):
         g_args = ckpt["config"]["model"]
-    else:                                                    # experiment cfg
+    else:
         cfg_dir = find_config_dir(gen_dir)
         g_args  = json.loads((cfg_dir / "config.json").read_text())["model"]
 
@@ -54,20 +52,23 @@ def load_generator(gen_dir: Path, dataset: str, device: torch.device):
     # 2) rebuild
     G, _ = construct_gan(g_args, img_sz, device)[:2]
 
-    # 3) load weights
+    # 3) filter state dict for matching shapes
     state = ckpt.get("state", ckpt)
-    try:
-        G.load_state_dict(state, strict=True)
-    except RuntimeError:
-        print("[WARN] strict load failed – retrying with strict=False")
-        missing, unexpected = G.load_state_dict(state, strict=False)
-        print("  missing:", len(missing), "unexpected:", len(unexpected))
+    model_sd = G.state_dict()
+    filtered = {k: v for k, v in state.items()
+                if k in model_sd and model_sd[k].shape == v.shape}
+
+    missing = [k for k in model_sd.keys() if k not in filtered]
+    extra   = [k for k in state.keys() if k not in filtered]
+
+    G.load_state_dict(filtered, strict=False)
+    print(f"[GEN] loaded {len(filtered)} tensors | "
+          f"skipped {len(missing)} missing, {len(extra)} size-mismatched/unused")
     return G.eval()
 
 
-# ----------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────
 def load_classifier(clf_dir: Path, dataset: str, device: torch.device):
-    """Try config-driven load first; else build a vanilla MLP and load weights loosely."""
     try:
         cfg_dir = find_config_dir(clf_dir)
         C, *_   = construct_classifier_from_checkpoint(str(cfg_dir), device)
@@ -82,7 +83,7 @@ def load_classifier(clf_dir: Path, dataset: str, device: torch.device):
         return C.eval()
 
 
-# ----------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────
 def main():
     p = argparse.ArgumentParser(
         description="Generate images with a GAN and rank them by ACD = |p_pos−0.5|"
@@ -106,7 +107,7 @@ def main():
     print("Loading classifier …")
     C = load_classifier(clf_dir, args.dataset, device)
 
-    # ------------------------------------------------------------------  generate
+    # ── generate
     z_dim = getattr(G, "z_dim", 128)
     zs    = torch.randn(args.num, z_dim, device=device)
 
@@ -115,9 +116,9 @@ def main():
         with torch.no_grad():
             out = G(zs[i:i+args.batch]).clamp(-1, 1).add(1).div(2).cpu()
         imgs.append(out)
-    imgs = torch.cat(imgs)[: args.num]          # (N, C, H, W)
+    imgs = torch.cat(imgs)[: args.num]
 
-    # ------------------------------------------------------------------  score
+    # ── score
     scored, acds = [], []
     for img in tqdm(imgs, desc="Scoring"):
         with torch.no_grad():
@@ -133,7 +134,7 @@ def main():
     scored.sort(key=lambda t: t[0])
     sorted_imgs = [img for _, img in scored]
 
-    # ------------------------------------------------------------------  grid
+    # ── grid
     rows = math.ceil(args.num / args.cols)
     pad  = rows * args.cols - args.num
     if pad:
