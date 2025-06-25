@@ -1,8 +1,10 @@
 from __future__ import annotations
-import math, torch, torch.nn as nn, torch.nn.functional as F
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.utils import spectral_norm
 
-# ───────── helpers ─────────
 def pixel_norm(x, eps=1e-8):
     return x * torch.rsqrt(torch.mean(x**2, dim=1, keepdim=True) + eps)
 
@@ -12,7 +14,6 @@ def he_init(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
 
-# ───────── self‐attention ─────────
 class SelfAttention(nn.Module):
     def __init__(self, ch):
         super().__init__()
@@ -30,7 +31,6 @@ class SelfAttention(nn.Module):
         o  = torch.bmm(h_, beta).view(b, c//2, h, w)
         return x + self.gamma * self.v(o)
 
-# ───────── mapping ─────────
 class Mapping(nn.Sequential):
     def __init__(self, z_dim=128, w_dim=512, n_layers=8):
         layers = []
@@ -39,9 +39,9 @@ class Mapping(nn.Sequential):
             layers += [nn.Linear(inp, w_dim), nn.LeakyReLU(.2)]
         super().__init__(*layers)
         self.apply(he_init)
-    def forward(self, z): return pixel_norm(super().forward(z))
+    def forward(self, z):
+        return pixel_norm(super().forward(z))
 
-# ───────── mod-conv ─────────
 class ModConv(nn.Module):
     def __init__(self, in_ch, out_ch, k=3, demod=True):
         super().__init__()
@@ -60,7 +60,6 @@ class ModConv(nn.Module):
         x   = F.conv2d(x, wgt, padding=self.pad, groups=b)
         return x.view(b,-1,h,w_)
 
-# ───────── G-block ─────────
 class GBlock(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
@@ -78,18 +77,6 @@ class GBlock(nn.Module):
         x = self.act(out2 + self.n2 * torch.randn_like(out2))
         return x
 
-# ───────── D-block ─────────
-class DBlock(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.c1   = spectral_norm(nn.Conv2d(in_ch, out_ch, 3,1,1))
-        self.c2   = spectral_norm(nn.Conv2d(out_ch,out_ch, 3,1,1))
-        self.skip = spectral_norm(nn.Conv2d(in_ch, out_ch,1))
-        self.pool = nn.AvgPool2d(2)
-        self.act  = nn.LeakyReLU(.2)
-    def forward(self, x):
-        y = self.pool(self.act(self.c2(self.act(self.c1(x)))))
-        return y + self.pool(self.skip(x))
 class DBlock(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
@@ -102,7 +89,6 @@ class DBlock(nn.Module):
         y = self.pool(self.act(self.c2(self.act(self.c1(x)))))
         return y + self.pool(self.skip(x))
 
-# ───────── Generator ─────────
 class Generator(nn.Module):
     def __init__(self, img_size=(1,128,128), z_dim=128, fmap=128, **_):
         super().__init__()
@@ -111,10 +97,10 @@ class Generator(nn.Module):
         log_res      = int(math.log2(h))
         self.mapping = Mapping(z_dim)
         self.const   = nn.Parameter(torch.randn(1, fmap*16, 4,4))
-        self.upsample= nn.Upsample(scale_factor=2,mode="nearest")
-
+        self.upsample= nn.Upsample(scale_factor=2, mode="nearest")
         in_ch = fmap*16
-        self.blocks, self.torgb = nn.ModuleList(), nn.ModuleList()
+        self.blocks = nn.ModuleList()
+        self.torgb  = nn.ModuleList()
         for i in range(log_res-2):
             out_ch = max(fmap, in_ch//2)
             self.blocks.append(GBlock(in_ch, out_ch))
@@ -127,25 +113,26 @@ class Generator(nn.Module):
 
     def forward(self, z):
         w = self.mapping(z)
-        x = self.const.expand(z.size(0),-1,-1,-1)
+        x = self.const.expand(z.size(0), -1, -1, -1)
         rgb = None
-        for blk, tor in zip(self.blocks, self.torgb):
-            x   = blk(x, w)
-            rgb = tor(x, w) if rgb is None else self.upsample(rgb) + tor(x, w)
+        ti = 0
+        for blk in self.blocks:
+            x = blk(x, w)
+            if isinstance(blk, GBlock):
+                new_rgb = self.torgb[ti](x, w)
+                rgb = new_rgb if rgb is None else self.upsample(rgb) + new_rgb
+                ti += 1
         return self.tanh(rgb)
 
-# ───────── Discriminator ─────────
 class Discriminator(nn.Module):
-    def __init__(self, img_size=(1,128,128), fmap=128, n_blocks=5, is_critic=False, **_):
+    def __init__(self, img_size=(1,128,128), fmap=128, is_critic=False, **_):
         super().__init__()
-        c,h,_    = img_size
-        log_res  = int(math.log2(h))
-        fmap16   = fmap*16
-
-        layers = [spectral_norm(nn.Conv2d(c, fmap, 3,1,1))]
-        in_ch  = fmap
-        res    = h//2
-        res    = h
+        c,h,_   = img_size
+        log_res = int(math.log2(h))
+        fmap16  = fmap*16
+        layers  = [spectral_norm(nn.Conv2d(c, fmap, 3,1,1))]
+        in_ch   = fmap
+        res     = h
         for i in range(log_res-2):
             out_ch = min(fmap16, in_ch*2)
             layers.append(DBlock(in_ch, out_ch))
@@ -153,7 +140,6 @@ class Discriminator(nn.Module):
                 layers.append(SelfAttention(out_ch))
             in_ch = out_ch
             res  //= 2
-
         self.features = nn.Sequential(*layers)
         self.fc       = spectral_norm(nn.Linear(in_ch*res*res, 1))
         self.act_out  = nn.Identity() if is_critic else nn.Sigmoid()
@@ -163,7 +149,6 @@ class Discriminator(nn.Module):
         h = self.features(x)
         return self.act_out(self.fc(h.flatten(1))).view(-1)
 
-# ───────── builders ─────────
 def build_cxr_g(z_dim=128, base_ch=128):
     return Generator((1,128,128), z_dim=z_dim, fmap=base_ch)
 
