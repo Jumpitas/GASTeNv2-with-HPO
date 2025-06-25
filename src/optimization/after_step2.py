@@ -33,90 +33,74 @@ def load_generator(gen_dir: Path, dataset: str, device):
     elif ckpt.get("config", {}).get("model"):
         g_args = ckpt["config"]["model"]
     else:
-        cfg_dir = find_config_dir(gen_dir)
-        g_args  = json.loads((cfg_dir / "config.json").read_text())["model"]
+        g_args = json.loads((find_config_dir(gen_dir)/"config.json").read_text())["model"]
     g_args.setdefault("img_size", DATASET_SPECS[dataset])
     img_sz = tuple(g_args["img_size"])
     G, _ = construct_gan(g_args, img_sz, device)[:2]
 
-    state = ckpt.get("state", ckpt)
-    model_sd = G.state_dict()
+    state, model_sd = ckpt.get("state", ckpt), G.state_dict()
     filtered = {k: v for k, v in state.items()
-                if k in model_sd and model_sd[k].shape == v.shape}
-    print(f"[GEN] loaded {len(filtered)} tensors | "
-          f"skipped {len(model_sd)-len(filtered)} missing, "
-          f"{len(state)-len(filtered)} size-mismatched/unused")
+                if k in model_sd and v.shape == model_sd[k].shape}
     G.load_state_dict(filtered, strict=False)
     return G.eval()
 
 def load_classifier(clf_dir: Path, dataset: str, device):
     try:
-        cfg_dir = find_config_dir(clf_dir)
-        C, *_   = construct_classifier_from_checkpoint(str(cfg_dir), device)
+        C, *_ = construct_classifier_from_checkpoint(str(find_config_dir(clf_dir)), device)
         return C.eval()
     except FileNotFoundError:
         C_, H, W = DATASET_SPECS[dataset]
-        params = {"type": "mlp", "n_classes": 2,
-                  "img_size": (C_, H, W), "hidden_dim": 512}
-        C = construct_classifier(params, device)
-        ckpt_path = clf_dir / "classifier.pth"
+        C = construct_classifier({"type":"mlp","n_classes":2,"img_size":(C_,H,W),"hidden_dim":512}, device)
+        path = clf_dir/"classifier.pth"
         try:
-            ckpt = torch.load(ckpt_path, map_location=device)
+            ckpt = torch.load(path, map_location=device)
         except (pickle.UnpicklingError, AttributeError):
-            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+            ckpt = torch.load(path, map_location=device, weights_only=False)
         C.load_state_dict(ckpt.get("state_dict", ckpt), strict=False)
         return C.eval()
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("gen_dir")
-    ap.add_argument("clf_dir")
+    ap.add_argument("gen_dir"); ap.add_argument("clf_dir")
     ap.add_argument("--dataset", required=True, choices=DATASET_SPECS)
-    ap.add_argument("--num",   type=int, default=10_000)
+    ap.add_argument("--num", type=int, default=10_000)
     ap.add_argument("--batch", type=int, default=64)
-    ap.add_argument("--cols",  type=int, default=100)
-    ap.add_argument("--out",   default="sheet.png")
-    ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    ap.add_argument("--cols", type=int, default=100)
+    ap.add_argument("--out", default="sheet.png")
+    ap.add_argument("--device", default="cuda", choices=["cuda","cpu"])
     args = ap.parse_args()
 
-    device  = torch.device(args.device)
+    device = torch.device(args.device)
     G = load_generator(Path(args.gen_dir), args.dataset, device)
     C = load_classifier(Path(args.clf_dir), args.dataset, device)
 
-    z_dim = getattr(G, "z_dim", 128)
-    zs    = torch.randn(args.num, z_dim, device=device)
-
+    z = torch.randn(args.num, getattr(G, "z_dim", 128), device=device)
     imgs = []
     for i in tqdm(range(0, args.num, args.batch), desc="Generating"):
         with torch.no_grad():
-            imgs.append(G(zs[i:i+args.batch]).clamp(-1, 1).add(1).div(2).cpu())
-    imgs = torch.cat(imgs)[: args.num]
+            imgs.append(G(z[i:i+args.batch]).clamp(-1,1).add(1).div(2).cpu())
+    imgs = torch.cat(imgs)[:args.num]
 
-    scored = []
-    acds   = []
+    scored, acds = [], []
     for img in tqdm(imgs, desc="Scoring"):
         with torch.no_grad():
-            p_pos = torch.softmax(C(img.unsqueeze(0).to(device)), -1)[0, 1].item()
-        acd = abs(p_pos - 0.5)
-        acds.append(acd)
-        scored.append((acd, img))
-
-    print(f"ACD mean {statistics.mean(acds):.4f} "
-          f"median {statistics.median(acds):.4f} "
-          f"<0.1 {(sum(a < 0.1 for a in acds)*100/len(acds)):.1f}%")
+            p = torch.softmax(C(img.unsqueeze(0).to(device)), -1)[0,1].item()
+        acd = abs(p-0.5)
+        scored.append((acd, img)); acds.append(acd)
 
     scored.sort(key=lambda t: t[0])
     sorted_imgs = [img for _, img in scored]
 
-    rows = math.ceil(args.num / args.cols)
-    pad  = rows * args.cols - args.num
+    rows = math.ceil(args.num/args.cols)
+    pad  = rows*args.cols-args.num
     if pad:
-        sorted_imgs += [torch.zeros_like(sorted_imgs[0])] * pad
+        sorted_imgs += [torch.zeros_like(sorted_imgs[0])]*pad
 
-    cols = [torch.cat(sorted_imgs[c*rows:(c+1)*rows], 1) for c in range(args.cols)]
-    sheet = torch.cat(cols, 2)
+    sheet = torch.cat([torch.cat(sorted_imgs[c*rows:(c+1)*rows],1)
+                       for c in range(args.cols)], 2)
 
     out_path = Path(args.out).with_suffix(".png")
+    out_path.parent.mkdir(parents=True, exist_ok=True)   # minimal change
     save_image(sheet, str(out_path))
     print("Saved", out_path)
 
