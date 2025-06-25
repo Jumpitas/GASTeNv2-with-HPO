@@ -72,8 +72,10 @@ class GBlock(nn.Module):
         self.act = nn.LeakyReLU(.2)
     def forward(self, x, w):
         x = self.up(x)
-        x = self.act(self.c1(x,w) + self.n1*torch.randn_like(x))
-        x = self.act(self.c2(x,w) + self.n2*torch.randn_like(x))
+        out1 = self.c1(x, w)
+        x = self.act(out1 + self.n1 * torch.randn_like(out1))
+        out2 = self.c2(x, w)
+        x = self.act(out2 + self.n2 * torch.randn_like(out2))
         return x
 
 # ───────── D-block ─────────
@@ -93,22 +95,21 @@ class DBlock(nn.Module):
 class Generator(nn.Module):
     def __init__(self, img_size=(1,128,128), z_dim=128, fmap=128, **_):
         super().__init__()
-        self.z_dim  = z_dim
-        c,h,_       = img_size
-        log_res     = int(math.log2(h))
-        self.mapping= Mapping(z_dim)
-        self.const  = nn.Parameter(torch.randn(1, fmap*16, 4,4))
-        self.upsample=nn.Upsample(scale_factor=2,mode="nearest")
+        self.z_dim   = z_dim
+        c,h,_        = img_size
+        log_res      = int(math.log2(h))
+        self.mapping = Mapping(z_dim)
+        self.const   = nn.Parameter(torch.randn(1, fmap*16, 4,4))
+        self.upsample= nn.Upsample(scale_factor=2,mode="nearest")
 
         in_ch = fmap*16
         self.blocks, self.torgb = nn.ModuleList(), nn.ModuleList()
         for i in range(log_res-2):
             out_ch = max(fmap, in_ch//2)
-            self.blocks .append(GBlock(in_ch, out_ch))
-            # insert self-attention at 32×32 & 64×64
+            self.blocks.append(GBlock(in_ch, out_ch))
             if 4*(2**i) in (32,64):
                 self.blocks.append(SelfAttention(out_ch))
-            self.torgb .append(ModConv(out_ch, c, 1, demod=False))
+            self.torgb.append(ModConv(out_ch, c, 1, demod=False))
             in_ch = out_ch
         self.tanh = nn.Tanh()
         self.apply(he_init)
@@ -116,35 +117,35 @@ class Generator(nn.Module):
     def forward(self, z):
         w = self.mapping(z)
         x = self.const.expand(z.size(0),-1,-1,-1)
-        rgb=None
+        rgb = None
         for blk, tor in zip(self.blocks, self.torgb):
-            x   = blk(x,w)
-            rgb = tor(x,w) if rgb is None else self.upsample(rgb)+tor(x,w)
+            x   = blk(x, w)
+            rgb = tor(x, w) if rgb is None else self.upsample(rgb) + tor(x, w)
         return self.tanh(rgb)
 
 # ───────── Discriminator ─────────
 class Discriminator(nn.Module):
     def __init__(self, img_size=(1,128,128), fmap=128, n_blocks=5, is_critic=False, **_):
         super().__init__()
-        c,h,_  = img_size
-        log_res= int(math.log2(h))
-        fmap16 = fmap*16
+        c,h,_    = img_size
+        log_res  = int(math.log2(h))
+        fmap16   = fmap*16
 
         layers = [spectral_norm(nn.Conv2d(c, fmap, 3,1,1))]
         in_ch  = fmap
         res    = h//2
+        res    = h
         for i in range(log_res-2):
             out_ch = min(fmap16, in_ch*2)
             layers.append(DBlock(in_ch, out_ch))
-            # self-attn at 64×64 & 32×32
             if res in (64,32):
                 layers.append(SelfAttention(out_ch))
             in_ch = out_ch
-            res//=2
+            res  //= 2
 
         self.features = nn.Sequential(*layers)
-        self.fc        = spectral_norm(nn.Linear(in_ch*res*res,1))
-        self.act_out   = nn.Identity() if is_critic else nn.Sigmoid()
+        self.fc       = spectral_norm(nn.Linear(in_ch*res*res, 1))
+        self.act_out  = nn.Identity() if is_critic else nn.Sigmoid()
         self.apply(he_init)
 
     def forward(self, x):
@@ -154,5 +155,6 @@ class Discriminator(nn.Module):
 # ───────── builders ─────────
 def build_cxr_g(z_dim=128, base_ch=128):
     return Generator((1,128,128), z_dim=z_dim, fmap=base_ch)
+
 def build_cxr_d(base_ch=128):
     return Discriminator((1,128,128), fmap=base_ch)
