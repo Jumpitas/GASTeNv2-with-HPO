@@ -10,10 +10,7 @@ from src.classifier import construct_classifier
 
 def _sanitize_state_dict(state_dict, model):
     """
-    Convert between DataParallel and non-DataParallel state_dict keys:
-      - If state_dict keys are prefixed with "module." but model keys are not, strip the prefix.
-      - If model keys are prefixed with "module." but state_dict keys are not, add the prefix.
-      - Otherwise, return state_dict unchanged.
+    Convert between DataParallel and non-DataParallel state_dict keys.
     """
     model_keys = list(model.state_dict().keys())
     state_keys = list(state_dict.keys())
@@ -21,7 +18,6 @@ def _sanitize_state_dict(state_dict, model):
     state_has_module = any(k.startswith("module.") for k in state_keys)
 
     if state_has_module and not model_has_module:
-        # strip "module." prefix
         new_state = OrderedDict()
         for k, v in state_dict.items():
             new_key = k[len("module."):] if k.startswith("module.") else k
@@ -29,19 +25,17 @@ def _sanitize_state_dict(state_dict, model):
         return new_state
 
     if model_has_module and not state_has_module:
-        # add "module." prefix
         new_state = OrderedDict()
         for k, v in state_dict.items():
             new_state["module." + k] = v
         return new_state
 
-    # no change needed
     return state_dict
 
 
 def checkpoint(model, model_name, model_params, train_stats, args,
                output_dir=None, optimizer=None):
-    output_dir = os.path.curdir if output_dir is None else output_dir
+    output_dir = os.path.curdir if output_dir is None else str(output_dir)
     output_dir = os.path.join(output_dir, model_name)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -88,7 +82,6 @@ def construct_classifier_from_checkpoint(path, device=None, optimizer=False):
     print(f"\t. Model {cp['name']}")
     print(f"\t. Params: {cp['params']}")
 
-    # ← Now construct_classifier is available
     model = construct_classifier(cp['params'], device=device)
     state = _sanitize_state_dict(cp['state'], model)
     model.load_state_dict(state)
@@ -124,7 +117,6 @@ def construct_gan_from_checkpoint(path, device=None):
         weights_only=False
     )
 
-    # infer image size
     if 'image-size' in model_params:
         image_size = tuple(model_params['image-size'])
     elif 'image_size' in model_params:
@@ -132,16 +124,11 @@ def construct_gan_from_checkpoint(path, device=None):
     else:
         raise KeyError("Could not find 'image-size' or 'image_size' in model configuration.")
 
-    # construct fresh models on desired device
     G, D = construct_gan(model_params, image_size, device=device)
 
-    # load state dicts (with module-prefix sanitization)
-    g_state = _sanitize_state_dict(gen_cp['state'], G)
-    d_state = _sanitize_state_dict(dis_cp['state'], D)
-    G.load_state_dict(g_state)
-    D.load_state_dict(d_state)
+    G.load_state_dict(_sanitize_state_dict(gen_cp['state'], G))
+    D.load_state_dict(_sanitize_state_dict(dis_cp['state'], D))
 
-    # reconstruct optimizers
     g_optim = optim.Adam(G.parameters(),
                          lr=optim_params["lr"],
                          betas=(optim_params["beta1"], optim_params["beta2"]))
@@ -160,26 +147,30 @@ def construct_gan_from_checkpoint(path, device=None):
 
 
 def get_gan_path_at_epoch(output_dir, epoch=None):
-    path = output_dir
-    if epoch is not None:
-        try:
-            epoch_int = int(epoch)
-            epoch_str = f"{epoch_int:02d}"
-        except (TypeError, ValueError):
-            epoch_str = str(epoch)
-        path = os.path.join(path, epoch_str)
-    return path
+    # ensure output_dir is string
+    base = str(output_dir)
+    if epoch is None:
+        return base
 
+    # always produce a string
+    try:
+        ei = int(epoch)
+        es = f"{ei:02d}"
+    except (TypeError, ValueError):
+        es = str(epoch)
 
-def load_gan_train_state(gan_path):
-    with open(os.path.join(gan_path, 'train_state.json')) as f:
-        return json.load(f)
+    return os.path.join(base, es)
 
 
 def checkpoint_gan(G, D, g_opt, d_opt, state, stats,
                    config, output_dir=None, epoch=None):
-    rootdir = os.path.curdir if output_dir is None else output_dir
-    path = get_gan_path_at_epoch(rootdir, epoch=epoch)
+    # Shim: if someone did checkpoint_gan(..., 5) treating '5' as output_dir,
+    # swap into epoch.
+    if isinstance(output_dir, int) and epoch is None:
+        epoch, output_dir = output_dir, None
+
+    rootdir = os.path.curdir if output_dir is None else str(output_dir)
+    path = get_gan_path_at_epoch(rootdir, epoch)
     os.makedirs(path, exist_ok=True)
 
     torch.save({
@@ -201,7 +192,7 @@ def checkpoint_gan(G, D, g_opt, d_opt, state, stats,
 
 
 def checkpoint_image(image, epoch, output_dir=None):
-    dirpath = os.path.curdir if output_dir is None else output_dir
+    dirpath = os.path.curdir if output_dir is None else str(output_dir)
     dirpath = os.path.join(dirpath, 'gen_images')
     os.makedirs(dirpath, exist_ok=True)
-    vutils.save_image(image, os.path.join(dirpath, f"{epoch:02d}.png"))
+    vutils.save_image(image, os.path.join(dirpath, f"{int(epoch):02d}.png"))

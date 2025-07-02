@@ -57,7 +57,10 @@ class MetricsLogger:
         for name in self.iteration_metrics:
             total = self.running_stats.get(name, 0.0)
             count = self.it_counter.get(name, 1)
-            epoch_value = total / count
+            if count == 0:
+                epoch_value = 0.0
+            else:
+                epoch_value = total / count
             self.stats[name].append(epoch_value)
             self.log_dict[self.apply_prefix(name)] = epoch_value
             if self.log_epoch:
