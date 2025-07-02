@@ -26,15 +26,12 @@ class SelfAttention(nn.Module):
         self.gamma  = nn.Parameter(torch.zeros(1))
 
     def forward(self, x, w=None):
-        # x: [B, C, H, W]
         b, c, h, w_ = x.shape
-        # project
-        q = self.to_q(x).reshape(b, -1, h*w_).permute(0, 2, 1)       # [B, N, qk_dim]
-        k = self.to_k(x).reshape(b, -1, h*w_).permute(0, 2, 1)       # [B, N, qk_dim]
-        v = self.to_v(x).reshape(b, -1, h*w_).permute(0, 2, 1)       # [B, N, C//2]
-        # memory‐efficient flash/​scaled‐dot‐product
-        attn = F.scaled_dot_product_attention(q, k, v)              # [B, N, C//2]
-        attn = attn.permute(0, 2, 1).reshape(b, c//2, h, w_)        # [B, C//2, H, W]
+        q = self.to_q(x).reshape(b, -1, h*w_).permute(0, 2, 1)
+        k = self.to_k(x).reshape(b, -1, h*w_).permute(0, 2, 1)
+        v = self.to_v(x).reshape(b, -1, h*w_).permute(0, 2, 1)
+        attn = F.scaled_dot_product_attention(q, k, v)
+        attn = attn.permute(0, 2, 1).reshape(b, c//2, h, w_)
         return x + self.gamma * self.to_out(attn)
 
 class Mapping(nn.Sequential):
@@ -110,7 +107,8 @@ class Generator(nn.Module):
         for i in range(log_res-2):
             out_ch = max(fmap, in_ch//2)
             self.blocks.append(GBlock(in_ch, out_ch))
-            if 4*(2**i) in (32,64):
+            # only at 32x32 now, not 64x64
+            if 4*(2**i) == 32:
                 self.blocks.append(SelfAttention(out_ch))
             self.torgb.append(ModConv(out_ch, c, 1, demod=False))
             in_ch = out_ch
@@ -142,7 +140,8 @@ class Discriminator(nn.Module):
         for i in range(log_res-2):
             out_ch = min(fmap16, in_ch*2)
             layers.append(DBlock(in_ch, out_ch))
-            if res in (64,32):
+            # only at 32x32 now, not 64x64
+            if res == 32:
                 layers.append(SelfAttention(out_ch))
             in_ch = out_ch
             res  //= 2
