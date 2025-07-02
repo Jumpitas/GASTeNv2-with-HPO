@@ -33,7 +33,7 @@ def evaluate(
     device: torch.device,
     c_out_hist=None,
     *,
-    rgb_repeat: bool = False,          # for 1-ch datasets (e.g. MNIST)
+    rgb_repeat: bool = False,
 ) -> None:
     was_training = G.training
     G.eval()
@@ -218,8 +218,13 @@ def train(
                           batch_size, tr_log, device)
 
                 if g_it % log_every_g == 0 or g_it == iters_per_epoch // n_disc_iters:
-                    print(f"[{epoch}/{n_epochs}] g_it {g_it}/{iters_per_epoch//n_disc_iters} "
-                          f"G {tr_log.last('G_loss'):.3f} | D {tr_log.last('D_loss'):.3f}")
+                    try:
+                        g_last = tr_log.last('G_loss')
+                        d_last = tr_log.last('D_loss')
+                        print(f"[{epoch}/{n_epochs}] g_it {g_it}/{iters_per_epoch//n_disc_iters} "
+                              f"G {g_last:.3f} | D {d_last:.3f}")
+                    except RuntimeError:
+                        pass
 
         # ---------- epoch end: images & metrics -------------------
         with torch.no_grad():

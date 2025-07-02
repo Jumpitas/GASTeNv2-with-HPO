@@ -162,7 +162,12 @@ def construct_gan_from_checkpoint(path, device=None):
 def get_gan_path_at_epoch(output_dir, epoch=None):
     path = output_dir
     if epoch is not None:
-        path = os.path.join(path, f"{epoch:02d}")
+        try:
+            epoch_int = int(epoch)
+            epoch_str = f"{epoch_int:02d}"
+        except (TypeError, ValueError):
+            epoch_str = str(epoch)
+        path = os.path.join(path, epoch_str)
     return path
 
 

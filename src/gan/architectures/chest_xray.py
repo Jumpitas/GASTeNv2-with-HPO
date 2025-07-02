@@ -15,21 +15,27 @@ def he_init(m):
             nn.init.zeros_(m.bias)
 
 class SelfAttention(nn.Module):
-    def __init__(self, ch):
+    def __init__(self, ch, qk_dim: int | None = None):
         super().__init__()
-        self.f = spectral_norm(nn.Conv2d(ch,   ch//8, 1))
-        self.g = spectral_norm(nn.Conv2d(ch,   ch//8, 1))
-        self.h = spectral_norm(nn.Conv2d(ch,   ch//2, 1))
-        self.v = spectral_norm(nn.Conv2d(ch//2, ch,    1))
-        self.gamma = nn.Parameter(torch.zeros(1))
+        qk_dim = qk_dim or ch // 8
+        # linear projections
+        self.to_q   = spectral_norm(nn.Conv2d(ch,     qk_dim, 1))
+        self.to_k   = spectral_norm(nn.Conv2d(ch,     qk_dim, 1))
+        self.to_v   = spectral_norm(nn.Conv2d(ch,   ch//2, 1))
+        self.to_out = spectral_norm(nn.Conv2d(ch//2,   ch, 1))
+        self.gamma  = nn.Parameter(torch.zeros(1))
+
     def forward(self, x, w=None):
-        b,c,h,w = x.size()
-        f = self.f(x).view(b, -1, h*w)
-        g = self.g(x).view(b, -1, h*w)
-        beta = torch.softmax(torch.bmm(f.permute(0,2,1), g), dim=-1)
-        h_ = self.h(x).view(b, -1, h*w)
-        o  = torch.bmm(h_, beta).view(b, c//2, h, w)
-        return x + self.gamma * self.v(o)
+        # x: [B, C, H, W]
+        b, c, h, w_ = x.shape
+        # project
+        q = self.to_q(x).reshape(b, -1, h*w_).permute(0, 2, 1)       # [B, N, qk_dim]
+        k = self.to_k(x).reshape(b, -1, h*w_).permute(0, 2, 1)       # [B, N, qk_dim]
+        v = self.to_v(x).reshape(b, -1, h*w_).permute(0, 2, 1)       # [B, N, C//2]
+        # memory‐efficient flash/​scaled‐dot‐product
+        attn = F.scaled_dot_product_attention(q, k, v)              # [B, N, C//2]
+        attn = attn.permute(0, 2, 1).reshape(b, c//2, h, w_)        # [B, C//2, H, W]
+        return x + self.gamma * self.to_out(attn)
 
 class Mapping(nn.Sequential):
     def __init__(self, z_dim=128, w_dim=512, n_layers=8):
@@ -117,7 +123,7 @@ class Generator(nn.Module):
         rgb = None
         ti = 0
         for blk in self.blocks:
-            x = blk(x, w)
+            x = blk(x, w) if isinstance(blk, GBlock) else blk(x)
             if isinstance(blk, GBlock):
                 new_rgb = self.torgb[ti](x, w)
                 rgb = new_rgb if rgb is None else self.upsample(rgb) + new_rgb
