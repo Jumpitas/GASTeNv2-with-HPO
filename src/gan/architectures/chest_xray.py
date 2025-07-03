@@ -18,7 +18,6 @@ class SelfAttention(nn.Module):
     def __init__(self, ch, qk_dim: int | None = None):
         super().__init__()
         qk_dim = qk_dim or ch // 8
-        # linear projections
         self.to_q   = spectral_norm(nn.Conv2d(ch,     qk_dim, 1))
         self.to_k   = spectral_norm(nn.Conv2d(ch,     qk_dim, 1))
         self.to_v   = spectral_norm(nn.Conv2d(ch,   ch//2, 1))
@@ -107,7 +106,6 @@ class Generator(nn.Module):
         for i in range(log_res-2):
             out_ch = max(fmap, in_ch//2)
             self.blocks.append(GBlock(in_ch, out_ch))
-            # only at 32x32 now, not 64x64
             if 4*(2**i) == 32:
                 self.blocks.append(SelfAttention(out_ch))
             self.torgb.append(ModConv(out_ch, c, 1, demod=False))
@@ -140,7 +138,6 @@ class Discriminator(nn.Module):
         for i in range(log_res-2):
             out_ch = min(fmap16, in_ch*2)
             layers.append(DBlock(in_ch, out_ch))
-            # only at 32x32 now, not 64x64
             if res == 32:
                 layers.append(SelfAttention(out_ch))
             in_ch = out_ch

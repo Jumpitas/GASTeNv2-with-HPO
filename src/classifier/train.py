@@ -15,9 +15,6 @@ from src.classifier import construct_classifier
 
 
 def evaluate(model, device, dataloader, criterion, acc_fun, verbose=True, desc='Validate', header=None):
-    """
-    Evaluate the classifier on the given dataloader.
-    """
     was_training = model.training
     model.eval()
     running_loss = 0.0
@@ -31,7 +28,6 @@ def evaluate(model, device, dataloader, criterion, acc_fun, verbose=True, desc='
     with torch.no_grad():
         for inputs, labels in loader:
             inputs = inputs.to(device)
-            # Ensure labels are integer type for CrossEntropyLoss
             labels = labels.to(device).long()
 
             outputs = model(inputs)
@@ -73,7 +69,6 @@ def train(model, optimizer, criterion, train_loader, val_loader, args, name, mod
 
         for inputs, labels in tqdm(train_loader, desc='Train'):
             inputs = inputs.to(device)
-            # Ensure labels are integer type
             labels = labels.to(device).long()
 
             optimizer.zero_grad()

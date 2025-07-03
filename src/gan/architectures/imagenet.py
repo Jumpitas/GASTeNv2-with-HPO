@@ -9,12 +9,10 @@ class ConditionalBatchNorm2d(nn.Module):
         super().__init__()
         self.bn = nn.BatchNorm2d(num_features, affine=False)
         self.embed = nn.Embedding(num_classes, num_features * 2)
-        # initialize gamma=1, beta=0
         self.embed.weight.data[:, :num_features].fill_(1)
         self.embed.weight.data[:, num_features:].zero_()
 
     def forward(self, x, y):
-        # x: [B,C,H,W], y: [B] int labels
         gamma, beta = self.embed(y).chunk(2, dim=1)
         gamma = gamma.view(-1, x.size(1), 1, 1)
         beta  = beta .view(-1, x.size(1), 1, 1)
@@ -32,10 +30,10 @@ class SelfAttention(nn.Module):
 
     def forward(self, x):
         b,c,h,w = x.size()
-        f = self.f(x).view(b, -1, h*w)                # key
-        g = self.g(x).view(b, -1, h*w)                # query
+        f = self.f(x).view(b, -1, h*w)
+        g = self.g(x).view(b, -1, h*w)
         beta = F.softmax(torch.bmm(f.permute(0,2,1), g), dim=-1)
-        h_   = self.h(x).view(b, -1, h*w)             # value
+        h_   = self.h(x).view(b, -1, h*w)
         o    = torch.bmm(h_, beta).view(b, c//2, h,w)
         o    = self.v(o)
         return x + self.gamma * o
@@ -57,25 +55,21 @@ class Generator(nn.Module):
         super().__init__()
         _, H, _ = image_size
         init_spatial = H // 16
-        # channel dims: [base_ch, 2*base_ch, 4*..., 8*..., 16*...]
         dims = [base_ch * (2**i) for i in range(5)]
         gen_dims = list(reversed(dims))
 
-        # project noise → feature map
         self.project = nn.Sequential(
             nn.ConvTranspose2d(z_dim, gen_dims[0], init_spatial, 1, 0, bias=False),
             ConditionalBatchNorm2d(gen_dims[0], num_classes),
             nn.ReLU(True),
         )
 
-        # up‐sampling blocks + insert SelfAttention at 56×56 stage
         blocks = []
         curr_h = init_spatial
         for i in range(len(gen_dims)-1):
             in_c, out_c = gen_dims[i], gen_dims[i+1]
             seq = []
             seq += [nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)]
-            # add attention when curr_h==56 (i.e. after 2 upsamples if H=224)
             if curr_h == H//4:
                 seq += [SelfAttention(in_c)]
             seq += [
@@ -92,19 +86,14 @@ class Generator(nn.Module):
         self.apply(weights_init)
 
     def forward(self, z, labels):
-        # z: [B, z_dim], labels: [B]
         x = z.view(-1, z.size(1), 1, 1)
-        # project + CBN requires labels
         x = self.project[0](x)
         x = self.project[1](x, labels)
         x = self.project[2](x)
-        # now up blocks
         for blk in self.gen_blocks:
-            # if it has CBN use (x, labels) else just x
             if isinstance(blk[0], SelfAttention):
                 x = blk(x)
             else:
-                # find all CBN layers in block
                 for layer in blk:
                     if isinstance(layer, ConditionalBatchNorm2d):
                         x = layer(x, labels)
@@ -127,7 +116,6 @@ class Discriminator(nn.Module):
             if use_bn and i>0:
                 seq.append(nn.BatchNorm2d(out_c))
             seq.append(nn.LeakyReLU(0.2, inplace=True))
-            # insert attention at 56×56 map (after two downsamples)
             if curr_h == H//4:
                 seq.append(SelfAttention(out_c))
             blocks.append(nn.Sequential(*seq))
@@ -135,13 +123,10 @@ class Discriminator(nn.Module):
             curr_h //= 2; curr_w //= 2
 
         self.conv_blocks = nn.Sequential(*blocks)
-        # final conv → [B, C, 1,1]
         self.final_conv = spectral_norm(nn.Conv2d(dims[-1], dims[-1], (curr_h, curr_w), 1,0, bias=False))
         self.flatten    = nn.Flatten()
 
-        # projection head embedding for labels
         self.embed = nn.Embedding(num_classes, dims[-1])
-        # no Sigmoid for hinge loss + R1
         self.sigmoid = nn.Identity()
 
         self.apply(weights_init)
@@ -150,12 +135,10 @@ class Discriminator(nn.Module):
         h = x
         for blk in self.conv_blocks:
             h = blk(h)
-        feats = self.final_conv(h)             # [B, C, 1,1]
-        flat  = self.flatten(feats)            # [B, C]
-        # unconditional logit
-        logit_uncond = (flat).sum(dim=1, keepdim=True)  # or a linear head
-        # projection score
-        emb = self.embed(labels)               # [B, C]
+        feats = self.final_conv(h)
+        flat  = self.flatten(feats)
+        logit_uncond = (flat).sum(dim=1, keepdim=True)
+        emb = self.embed(labels)
         proj = torch.sum(flat * emb, dim=1, keepdim=True)
-        out  = logit_uncond + proj             # [B,1]
+        out  = logit_uncond + proj
         return self.sigmoid(out).view(-1)

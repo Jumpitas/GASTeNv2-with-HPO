@@ -1,4 +1,3 @@
-# src/optimization/gasten_bayesian_optimization_step1.py
 from __future__ import annotations
 import argparse, math, os, shutil, torch
 from dotenv import load_dotenv
@@ -17,7 +16,7 @@ from src.utils import (
 )
 from src.gan import construct_gan, construct_loss
 from src.gan.update_g import UpdateGeneratorGAN
-from src.gan.train import train_disc, train_gen, evaluate        # <- wrappers still work
+from src.gan.train import train_disc, train_gen, evaluate
 from src.utils.checkpoint import checkpoint_gan
 
 
@@ -103,7 +102,7 @@ def main() -> None:
 
         if torch.cuda.device_count() > 1:
             G, D = torch.nn.DataParallel(G), torch.nn.DataParallel(D)
-            G.z_dim = G.module.z_dim     # expose latent dim
+            G.z_dim = G.module.z_dim
 
         G, D = G.to(device), D.to(device)
         g_up  = UpdateGeneratorGAN(g_crit)

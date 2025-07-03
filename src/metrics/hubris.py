@@ -24,10 +24,8 @@ class Hubris(Metric):
         if out.ndim == 2 and out.size(1) == 2:
             preds = F.softmax(out, dim=1)[:, 1]
         else:
-            # otherwise assume feature‐maps: pool down to a scalar per sample
-            # now out.ndim >= 3
-            pooled = F.adaptive_avg_pool2d(out, (1, 1))  # → [B, C,1,1]
-            pooled = pooled.flatten(1).mean(dim=1)       # → [B]
+            pooled = F.adaptive_avg_pool2d(out, (1, 1))
+            pooled = pooled.flatten(1).mean(dim=1)
             preds = pooled
 
         # store on CPU

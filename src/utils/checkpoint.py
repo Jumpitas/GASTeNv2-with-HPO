@@ -147,12 +147,10 @@ def construct_gan_from_checkpoint(path, device=None):
 
 
 def get_gan_path_at_epoch(output_dir, epoch=None):
-    # ensure output_dir is string
     base = str(output_dir)
     if epoch is None:
         return base
 
-    # always produce a string
     try:
         ei = int(epoch)
         es = f"{ei:02d}"
@@ -164,8 +162,6 @@ def get_gan_path_at_epoch(output_dir, epoch=None):
 
 def checkpoint_gan(G, D, g_opt, d_opt, state, stats,
                    config, output_dir=None, epoch=None):
-    # Shim: if someone did checkpoint_gan(..., 5) treating '5' as output_dir,
-    # swap into epoch.
     if isinstance(output_dir, int) and epoch is None:
         epoch, output_dir = output_dir, None
 

@@ -32,7 +32,6 @@ class DiscriminatorLoss:
 class NS_DiscriminatorLoss(DiscriminatorLoss):
     def __init__(self):
         super().__init__([])
-        # combine sigmoid + BCE in one go
         self.bce_logits = nn.BCEWithLogitsLoss()
 
     def __call__(self, real_data, fake_data, real_output, fake_output, device):
@@ -157,7 +156,6 @@ class W_GeneratorLoss(GeneratorLoss):
         super().__init__([])
 
     def __call__(self, device, output):
-        # maximize output.mean()
         return - output.mean()
 
 class Hinge_GeneratorLoss(GeneratorLoss):

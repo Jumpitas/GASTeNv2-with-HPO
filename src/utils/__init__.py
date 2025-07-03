@@ -98,7 +98,6 @@ def make_grid(images, nrow=None, total_images=None):
 
 
 def group_images(images, classifier=None, device=None):
-    # if no classifier, just return a simple tiled grid
     if classifier is None:
         return make_grid(images)
 
@@ -111,20 +110,16 @@ def group_images(images, classifier=None, device=None):
         batch = images[start:stop].to(device)
         out = classifier(batch)
 
-        # two-class logits → prob of class 1
         if out.ndim == 2 and out.size(1) == 2:
             probs = F.softmax(out, dim=1)[:, 1]
         else:
-            # single-logit → sigmoid
             probs = torch.sigmoid(out.view(-1))
 
         y[start:stop] = probs
 
-    # sort images by score
     y, idxs = torch.sort(y)
     images = images.to(device)[idxs]
 
-    # split into 10 equal bins
     n_divs = 10
     step = 1.0 / n_divs
     groups = []
@@ -139,18 +134,15 @@ def group_images(images, classifier=None, device=None):
         largest = max(largest, hi - lo)
         lo = hi
 
-    # if no images at all, fallback
     if largest == 0:
         return make_grid(images)
 
-    # determine reference grid shape by padding a dummy batch of size `largest`
     nrow = 3
     C0, H0, W0 = images.size(1), images.size(2), images.size(3)
     dummy = torch.zeros(largest, C0, H0, W0, device=device)
     ref_grid = make_grid(dummy, nrow=nrow, total_images=largest)
     C_out, H_out, W_out = ref_grid.shape
 
-    # build a little grid for each group, padded to same size
     grids = []
     for g in groups:
         if g.numel() == 0:
@@ -159,7 +151,6 @@ def group_images(images, classifier=None, device=None):
             padded = make_grid(g, nrow=nrow, total_images=largest)
             grids.append(padded)
 
-    # concatenate side by side
     return torch.cat(grids, dim=2)
 
 

@@ -48,7 +48,6 @@ def evaluate(
         with torch.no_grad():
             gen_batch = G(z_batch.to(device))
 
-        # optional 1→3 channel repeat for Inception
         if rgb_repeat and gen_batch.shape[1] == 1:
             gen_batch = gen_batch.repeat_interleave(3, dim=1)
 
@@ -60,7 +59,6 @@ def evaluate(
 
         start += real_sz
 
-    # log results
     for name, metric in fid_metrics.items():
         value = metric.finalize()
         stats_logger.update_epoch_metric(name, value, prnt=True)
@@ -245,6 +243,11 @@ def train(
             checkpoint_gan(G, D, g_opt, d_opt, None,
                            {"eval": ev_log.stats, "train": tr_log.stats},
                            config, epoch, checkpoint_dir)
+
+
+    metrics = {"train": tr_log.stats, "eval": ev_log.stats}
+    optim_state = {"g_opt": g_opt.state_dict(), "d_opt": d_opt.state_dict()}
+    return G, D, optim_state, metrics
 
 
 # ======================================================================

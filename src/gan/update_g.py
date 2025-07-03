@@ -45,7 +45,6 @@ class UpdateGeneratorGASTEN(UpdateGenerator):
         fake_data = G(noise)
         output = D(fake_data)
         term_1 = self.crit(device, output)
-        # Directly obtain classifier output from the single classifier
         clf_output = self.C(fake_data)
         term_2 = (0.5 - clf_output).abs().mean()
         loss = term_1 + self.alpha * term_2
@@ -68,7 +67,6 @@ class UpdateGeneratorGASTEN_MGDA(UpdateGenerator):
         return loss.item() * np.sqrt(np.sum([gr.pow(2).sum().data.cpu() for gr in grads]))
 
     def __call__(self, G, D, optim, noise, device):
-        # Compute gradients for term 1 (adversarial loss)
         G.zero_grad()
         fake_data = G(noise)
         output = D(fake_data)
@@ -76,7 +74,6 @@ class UpdateGeneratorGASTEN_MGDA(UpdateGenerator):
         term_1.backward()
         term_1_grads = [param.grad.data.clone() for param in G.parameters() if param.grad is not None]
 
-        # Compute gradients for term 2 (confusion loss using classifier)
         G.zero_grad()
         fake_data = G(noise)
         c_output = self.C(fake_data)

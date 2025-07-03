@@ -83,7 +83,6 @@ class MinibatchStd(nn.Module):
 
 # ───────────────────────── Generator ──────────────────────
 class Generator(nn.Module):
-    # NOTE: **img_size comes first** so construct_gan(*args, z_dim=...) works
     def __init__(self,
                  img_size: tuple[int, int, int] = (3, 32, 32),
                  z_dim: int = 128,

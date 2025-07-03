@@ -73,8 +73,8 @@ class MiniViT(nn.Module):
 
     def forward(self, x: torch.Tensor):
         b = x.size(0)
-        x = self.to_patches(x)            # (b,dim,H/ps,W/ps)
-        x = x.flatten(2).transpose(1,2)   # (b, n_patches, dim)
+        x = self.to_patches(x)
+        x = x.flatten(2).transpose(1,2)
         cls = self.cls_token.expand(b, -1, -1)
         x   = torch.cat((cls, x), dim=1) + self.pos_emb
         x   = self.transformer(x)
@@ -104,14 +104,14 @@ def construct_classifier(params: dict, device: str | torch.device | None = None)
         heads       = params.get("vit_heads", 4)
         mlp_dim     = params.get("vit_mlp_dim", dim * 2)
 
-        # only instantiate if valid else fallback
+
         try:
             model = MiniViT((C,H,W), patch_size, dim, depth, heads, mlp_dim, n_cls)
         except AssertionError:
             model = PooledMLP(C, n_cls, pool_sz=params.get("pool_sz", 32), hidden_dim=hidden_dim)
         return model.to(device) if device else model
 
-    # TIMM branch (unchanged)
+    # TIMM branch
     freeze = mtype.startswith("frozen_")
     if freeze:
         mtype = mtype[len("frozen_"):]

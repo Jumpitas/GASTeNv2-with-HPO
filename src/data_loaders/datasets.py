@@ -72,7 +72,7 @@ def get_chest_xray(root, train=True):
     return CXR(ds)
 
 
-# ─── ImageNet-1k (only part that changed) ───────────────────────────────
+# ─── ImageNet-1k ───────────────────────────────
 HF_TOKEN = os.getenv("HUGGINGFACE_HUB_TOKEN")
 
 
@@ -83,7 +83,7 @@ def get_imagenet(root, train=True, *, streaming=False, use_local_folders=False):
         folder = Path(root) / ("train" if train else "val")
         ds = hf_load_dataset("imagefolder",
                              data_dir=str(folder),
-                             split="train")           # dummy split
+                             split="train")
     else:
         ds = hf_load_dataset(
             "imagenet-1k",
@@ -111,7 +111,6 @@ def get_imagenet(root, train=True, *, streaming=False, use_local_folders=False):
             x = tfm(img)
             return x, ex["label"]
 
-        # ← changed: pull labels directly, no JPEG decode
         @property
         def targets(self):
             return torch.tensor(self.d["label"])

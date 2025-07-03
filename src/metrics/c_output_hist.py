@@ -62,7 +62,6 @@ class OutputsHistogram(Metric):
         # 3‐panel figure: output dist, confusion dist, hubris
         fig, axs = plt.subplots(1, 3, figsize=(18, 6))
 
-        # 1) classifier outputs
         self._var_safe_plot(
             self.y_hat.numpy(),
             axs[0],
@@ -71,7 +70,7 @@ class OutputsHistogram(Metric):
             xlim=(0, 1),
         )
 
-        # 2) confusion distance
+
         cd = np.abs(0.5 - self.y_hat.numpy())
         self._var_safe_plot(
             cd,
@@ -81,19 +80,15 @@ class OutputsHistogram(Metric):
             xlim=(0, 0.5),
         )
 
-        # 3) hubris bar
         hubris_val = float(self.hubris.finalize())
         axs[2].bar(["Hubris"], [hubris_val])
         axs[2].set_ylim(0, 1)
 
-        # render canvas
         fig.canvas.draw()
 
-        # grab the RGBA buffer from the Agg canvas
         buf, (w, h) = fig.canvas.print_to_buffer()
         arr = np.frombuffer(buf, dtype=np.uint8).reshape((h, w, 4))
 
-        # convert to PIL, then to RGB tensor
         img = PIL.Image.fromarray(arr, mode="RGBA").convert("RGB")
         plt.close(fig)
         return self.to_tensor(img)

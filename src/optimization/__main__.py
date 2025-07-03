@@ -11,7 +11,6 @@ from src.utils import create_and_store_z, gen_seed, set_seed
 from dotenv import load_dotenv
 from src.utils.config import read_config_clustering, read_config
 from src.clustering.generate_embeddings import load_gasten
-# Removed import of begin_ensemble since we are not optimizing the classifier
 load_dotenv()
 
 parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
@@ -64,12 +63,9 @@ def main():
     l_epochs = sorted(list(set([e for e in args.epochs.split(",") if e.isdigit()])), key=int)
     l_clf_type = sorted(list(set([ct for ct in args.clf_type.split(",")])))
 
-    # For fixed classifier, we simply use the provided classifier path.
-    # Change the path below to your fixed classifier checkpoint.
     fixed_classifier_path = f"{os.environ['FILESDIR']}/models/{args.dataset}.5v{args.neg_class}v{args.pos_class}/my_fixed_classifier.pth"
     print("Using fixed classifier:", fixed_classifier_path)
 
-    # Set positive/negative classes as strings.
     pos_class = str(args.pos_class)
     neg_class = str(args.neg_class)
 
@@ -82,7 +78,6 @@ def main():
                         '--device', args.device,
                         '--pos', pos_class, '--neg', neg_class])
 
-    # We assume the classifier is fixed, so skip generating classifiers.
 
     if not os.path.exists(f"{os.environ['FILESDIR']}/data/z/z_{args.nz}_{args.z_dim}"):
         create_and_store_z(
@@ -94,8 +89,8 @@ def main():
                     '--config', args.config_path_optim, '--pos', pos_class, '--neg', neg_class,
                     '--dataset', args.dataset, '--fid-stats', fid_stats_path])
 
-    # For step2, we now use the fixed classifier path rather than scanning a directory.
-    classifier_paths = fixed_classifier_path  # a single path string
+
+    classifier_paths = fixed_classifier_path
 
     subprocess.run(['python3', '-m', 'src.optimization.gasten_multifidelity_optimization_step2',
                     '--config', args.config_path_optim, '--classifiers', classifier_paths, '--pos', pos_class,

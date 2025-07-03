@@ -13,14 +13,11 @@ class LossSecondTerm(Metric):
         start_idx, batch_size = batch
         with torch.no_grad():
             try:
-                # try the “feature‐map” API
                 output = self.C(images, output_feature_maps=True)
                 c_output = output[0]
             except TypeError:
-                # fallback to plain forward if it doesn't accept that kwarg
                 c_output = self.C(images)
 
-        # your existing term calculation
         term_2 = (0.5 - c_output).sum().abs().item()
         self.acc += term_2
         self.count += images.size(0)

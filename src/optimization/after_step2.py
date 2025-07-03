@@ -100,7 +100,7 @@ def main():
                        for c in range(args.cols)], 2)
 
     out_path = Path(args.out).with_suffix(".png")
-    out_path.parent.mkdir(parents=True, exist_ok=True)   # minimal change
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     save_image(sheet, str(out_path))
     print("Saved", out_path)
 

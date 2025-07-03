@@ -27,7 +27,6 @@ def load_dataset(name, data_dir, pos_class=None, neg_class=None, train=True):
     if len(image_size) == 2:
         image_size = (1, *image_size)
     elif len(image_size) == 3:
-        # Only reformat if the channel dimension is last.
         if image_size[-1] == 3:
             image_size = (image_size[-1],) + image_size[:-1]
 
@@ -36,7 +35,6 @@ def load_dataset(name, data_dir, pos_class=None, neg_class=None, train=True):
         targets = dataset.targets if torch.is_tensor(dataset.targets) else torch.Tensor(dataset.targets)
         num_classes = targets.unique().size(0)
     else:
-        # If no 'targets' attribute exists, set as None or a default.
         num_classes = None
 
     if pos_class is not None and neg_class is not None:
